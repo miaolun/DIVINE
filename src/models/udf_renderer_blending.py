@@ -117,7 +117,7 @@ class UDFRendererBlending:
         deviation_network,
         beta_network,
         color_network,
-        p_edge_network,
+        vd_network,
         n_samples,
         n_importance,
         n_outside,
@@ -136,7 +136,7 @@ class UDFRendererBlending:
         self.udf_network = udf_network
         self.deviation_network = deviation_network
         self.beta_network = beta_network  # use to detect zero-level set
-        self.p_edge_network = p_edge_network
+        self.vd_network = vd_network
         self.color_network = color_network
 
         # sampling setting
@@ -420,8 +420,12 @@ class UDFRendererBlending:
         return alpha
 
     # add by ml
-    def gaussian_1d(self, x, mu=0.0 , sigma=0.1, amplitude=1.0):
+    def gaussian_1d(self, x, mu=0.0 , sigma=0.2, amplitude=1.0):
         return amplitude * torch.exp(-((x - mu) ** 2) / (2 * sigma ** 2))
+
+    def squared_constraint_loss(self, vi, vd):
+        excess = torch.relu(vi + vd -1)
+        return torch.mean(excess ** 2)
 
     def render_core(
         self,
@@ -432,7 +436,7 @@ class UDFRendererBlending:
         udf_network,
         deviation_network,
         color_network,
-        p_edge_network,
+        vd_network,
         beta_network=None,
         cos_anneal_ratio=None,
         background_rgb=None,
@@ -467,33 +471,24 @@ class UDFRendererBlending:
         udf_nn_output, inputs = udf_network(pts)
 
         udf = udf_nn_output[:, :1]
-        feature_vector = udf_nn_output[:, 1:]
+        vi = udf_nn_output[:, 1:2]
+        feature_vector = udf_nn_output[:, 2:]
 
         gradients = udf_network.gradient(pts).reshape(batch_size * n_samples, 3)
 
         gradients_mag = torch.linalg.norm(gradients, ord=2, dim=-1, keepdim=True)
         gradients_norm = gradients / (gradients_mag + 1e-5)  # normalize to unit vector
 
-        p_edge = p_edge_network(gradients_norm, dirs, feature_vector)
+        vd = vd_network(gradients_norm, dirs, feature_vector)
         sampled_color = color_network(gradients_norm, dirs, feature_vector)
 
-        # add by ml
-        # ufea_unmask = p_edge_output[:, :1]
-        # sampled_color = p_edge_output[:, 1:].reshape(batch_size, n_samples, 3)
-        #
         # # geometry constraint
-        # dependent_mask = self.gaussian_1d((dirs * gradients).sum(dim=1).unsqueeze(1))
-        # ufea_mask = ufea_unmask * dependent_mask
-        #
-        # epsilon = 1e-4
-        # max_fea = 1.0 - epsilon
-        # fea = torch.clamp(fea, min=epsilon, max=max_fea)
-        # max_ufea = torch.sqrt(1 - fea **2)
-        # min_ufea = torch.zeros_like(fea)
-        # ufea = torch.clamp(ufea_mask,min=min_ufea, max=max_ufea)
-        #
-        # p_edge = torch.sqrt(fea ** 2 + ufea ** 2).reshape(batch_size, n_samples, 1)
+        dependent_mask = self.gaussian_1d((dirs * gradients_norm).sum(dim=1).unsqueeze(1))
+        vd = torch.sigmoid(vd)
+        vi = torch.sigmoid(vi)
 
+        p_edge = (1 - dependent_mask) * vi + dependent_mask * vd
+        v_error = self.squared_constraint_loss(vi, vd)
 
         inv_s = deviation_network(torch.zeros([1, 3]).to(self.device))[:, :1].clip(
             1e-6, 1e6
@@ -635,6 +630,10 @@ class UDFRendererBlending:
 
         weights_sum = weights.sum(dim=-1, keepdim=True)
 
+        vd_render = vd * dependent_mask
+
+        vi_edge = (vi.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
+        vd_edge = (vd_render.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
 
         edge = (p_edge.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
         color = (sampled_color.reshape(batch_size, n_samples, 3) * weights[:,:, None]).sum(dim=1)
@@ -710,7 +709,9 @@ class UDFRendererBlending:
             "dists": dists,
             "sparse_error": sparse_error,
 
-            "p_edge": p_edge
+            "vi_edge": vi_edge,
+            "vd_edge": vd_edge,
+            "v_error": v_error,
         }
 
     def render(
@@ -808,7 +809,7 @@ class UDFRendererBlending:
             self.udf_network,
             self.deviation_network,
             self.color_network,
-            self.p_edge_network,
+            self.vd_network,
             beta_network=self.beta_network,
             cos_anneal_ratio=cos_anneal_ratio,
             background_rgb=background_rgb,
@@ -837,7 +838,9 @@ class UDFRendererBlending:
             "gradient_mag": ret_fine["gradient_mag"],
             "mid_z_vals": ret_fine["mid_z_vals"],
             "dists": ret_fine["dists"],
-            "p_edge": ret_fine["p_edge"],
+            "vi_edge": ret_fine["vi_edge"],
+            "vd_edge": ret_fine["vd_edge"],
+            "v_error": ret_fine["v_error"],
         }
 
     @torch.no_grad()

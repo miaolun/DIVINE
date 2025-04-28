@@ -116,6 +116,7 @@ class Runner_UDF(Runner):
             edge = render_out["edge"]
             color = render_out["color"]
             depth = render_out["depth"]
+            v_error = render_out["v_error"]
 
             variance = render_out["variance"]
             beta = render_out["beta"]
@@ -176,8 +177,9 @@ class Runner_UDF(Runner):
             igr_ns_weight = self.igr_ns_weight
 
             loss = (
-                # edge_loss
+                edge_loss
                 + color_loss
+                + v_error
                 + gradient_error_near_surface * igr_ns_weight
                 + gradient_error_loss * self.igr_weight
             )
@@ -280,7 +282,7 @@ class Runner_UDF(Runner):
         self.variance_network_fine.load_state_dict(checkpoint["variance_network_fine"])
         self.beta_network.load_state_dict(checkpoint["beta_network"])
         self.color_network.load_state_dict(checkpoint["color_network"])
-        self.p_edge_network.load_state_dict(checkpoint["p_edge_network"])
+        self.vd_network.load_state_dict(checkpoint["vd_network"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.iter_step = checkpoint["iter_step"]
 
@@ -295,7 +297,7 @@ class Runner_UDF(Runner):
             "variance_network_fine": self.variance_network_fine.state_dict(),
             "beta_network": self.beta_network.state_dict(),
             "color_network": self.color_network.state_dict(),
-            "p_edge_network": self.p_edge_network.state_dict(),
+            "vd_network": self.vd_network.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "iter_step": self.iter_step,
         }
@@ -330,6 +332,7 @@ class Runner_UDF(Runner):
         out_normal_fine = []
         out_depth = []
         out_edge_vi = []
+        out_edge_vd = []
         out_color = []
 
         for rays_o_batch, rays_d_batch, depth_scale_batch in zip(
@@ -360,7 +363,8 @@ class Runner_UDF(Runner):
 
             if feasible("edge"):
                 out_edge_fine.append(render_out["edge"].detach().cpu().numpy())
-                # out_edge_vi.append(render_out["edge_vi"].detach().cpu().numpy())
+                out_edge_vi.append(render_out["vi_edge"].detach().cpu().numpy())
+                out_edge_vd.append(render_out["vd_edge"].detach().cpu().numpy())
             if feasible("edge_pixel"):
                 out_edge_pixel.append(render_out["edge_pixel"].detach().cpu().numpy())
             if feasible("depth"):
@@ -442,50 +446,58 @@ class Runner_UDF(Runner):
             del render_out
 
         # image
-        # img_edge_fine = None
-        # img_edge_vi= None
-        # if len(out_edge_fine) > 0:
-        #     edge_fine = (
-        #         np.concatenate(out_edge_fine, axis=0).reshape([H, W]) * 255
-        #     ).clip(0, 255)
-        #     img_edge_fine = np.array(
-        #         Image.fromarray(edge_fine.astype(np.uint8)).convert("RGB")
-        #     )
-        #
-        #     edge_vi = (
-        #             np.concatenate(out_edge_vi, axis=0).reshape([H, W]) * 255
-        #     ).clip(0, 255)
-        #     img_edge_vi = np.array(
-        #         Image.fromarray(edge_vi.astype(np.uint8)).convert("RGB")
-        #     )
-        #
-        # img_edge_pixel = None
-        # if len(out_edge_pixel) > 0:
-        #     img_edge_pixel = (
-        #         np.concatenate(out_edge_pixel, axis=0).reshape([H, W, 3]) * 255
-        #     ).clip(0, 255)
-        # os.makedirs(os.path.join(self.base_exp_dir, "edge_maps"), exist_ok=True)
-        #
-        # if len(out_edge_fine) > 0:
-        #     if len(out_edge_pixel) > 0:
-        #         edges = [img_edge_fine, img_edge_pixel]
-        #     else:
-        #         edges = [img_edge_fine]
-        #         edges_vi = [img_edge_vi]
-        #
-        #     gt_edge = self.dataset.edge_at(
-        #         idx, resolution_level=resolution_level
-        #     ).astype(np.uint8)
-        #     cv.imwrite(
-        #         os.path.join(
-        #             self.base_exp_dir,
-        #             "edge_maps",
-        #             "{:0>8d}_{}.png".format(self.iter_step, idx),
-        #         ),
-        #         np.concatenate(
-        #             edges_vi + edges + [np.array(Image.fromarray(gt_edge).convert("RGB"))]
-        #         ),
-        #     )
+        img_edge_fine = None
+        img_edge_vi = None
+        img_edge_vd = None
+        if len(out_edge_fine) > 0:
+            edge_fine = (
+                np.concatenate(out_edge_fine, axis=0).reshape([H, W]) * 255
+            ).clip(0, 255)
+            img_edge_fine = np.array(
+                Image.fromarray(edge_fine.astype(np.uint8)).convert("RGB")
+            )
+
+            edge_vi = (
+                    np.concatenate(out_edge_vi, axis=0).reshape([H, W]) * 255
+            ).clip(0, 255)
+            img_edge_vi = np.array(
+                Image.fromarray(edge_vi.astype(np.uint8)).convert("RGB")
+            )
+
+            edge_vd = (
+                    np.concatenate(out_edge_vd, axis=0).reshape([H, W]) * 255
+            ).clip(0, 255)
+            img_edge_vd = np.array(
+                Image.fromarray(edge_vd.astype(np.uint8)).convert("RGB")
+            )
+        img_edge_pixel = None
+        if len(out_edge_pixel) > 0:
+            img_edge_pixel = (
+                np.concatenate(out_edge_pixel, axis=0).reshape([H, W, 3]) * 255
+            ).clip(0, 255)
+        os.makedirs(os.path.join(self.base_exp_dir, "edge_maps"), exist_ok=True)
+
+        if len(out_edge_fine) > 0:
+            if len(out_edge_pixel) > 0:
+                edges = [img_edge_fine, img_edge_pixel]
+            else:
+                edges = [img_edge_fine]
+                edges_vi = [img_edge_vi]
+                edges_vd = [img_edge_vd]
+
+            gt_edge = self.dataset.edge_at(
+                idx, resolution_level=resolution_level
+            ).astype(np.uint8)
+            cv.imwrite(
+                os.path.join(
+                    self.base_exp_dir,
+                    "edge_maps",
+                    "{:0>8d}_{}.png".format(self.iter_step, idx),
+                ),
+                np.concatenate(
+                    edges_vi + edges_vd + edges + [np.array(Image.fromarray(gt_edge).convert("RGB"))]
+                ),
+            )
 
         # color
         img_color_fine = None

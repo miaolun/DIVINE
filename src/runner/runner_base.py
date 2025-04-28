@@ -107,7 +107,7 @@ class Runner:
             self.device)
         self.color_network = RenderingNetwork(**self.conf["model.rendering_network"]).to(
             self.device)
-        self.p_edge_network = RenderingNetwork(**self.conf["model.rendering_edge_network"]).to(
+        self.vd_network = RenderingNetwork(**self.conf["model.vd_network"]).to(
             self.device)    # add by ml
 
 
@@ -117,7 +117,7 @@ class Runner:
         params_to_train += list(self.beta_network.parameters())
 
         params_to_train += list(self.color_network.parameters())
-        params_to_train += list(self.p_edge_network.parameters())   # add by ml
+        params_to_train += list(self.vd_network.parameters())   # add by ml
 
         self.optimizer = torch.optim.Adam(
             [
@@ -134,7 +134,7 @@ class Runner:
             self.variance_network_fine,
             self.beta_network,
             self.color_network,
-            self.p_edge_network,
+            self.vd_network,
             device=self.device,
             **self.conf["model.udf_renderer"],
         )
