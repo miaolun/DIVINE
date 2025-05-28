@@ -11,6 +11,7 @@ from src.models.udf_model import (
     BetaNetwork,
     SingleVarianceNetwork,
     RenderingNetwork,
+    ViNetwork,
 )
 from src.models.udf_renderer_blending import UDFRendererBlending
 from src.models.loss import EdgeLoss
@@ -87,14 +88,18 @@ class Runner:
         params_to_train = []
         params_to_train_nerf = []
         params_to_train_geo = []
+        params_to_train_vi =[]
+        params_to_train_vd = []
+
 
         self.nerf_outside = None
         self.nerf_coarse = None
         self.nerf_fine = None
         self.udf_network_fine = None
         self.variance_network_fine = None
-        self.p_edge_network = None
         self.color_network =None
+        self.vd_network = None
+        self.vi_network = None
 
         # self.nerf_outside = NeRF(**self.conf["model.nerf"]).to(self.device)
         self.udf_network_fine = UDFNetwork(**self.conf["model.udf_network"]).to(
@@ -107,19 +112,31 @@ class Runner:
             self.device)
         self.color_network = RenderingNetwork(**self.conf["model.rendering_network"]).to(
             self.device)
+        self.vi_network = ViNetwork(**self.conf["model.vi_network"]).to(
+            self.device)
         self.vd_network = RenderingNetwork(**self.conf["model.vd_network"]).to(
-            self.device)    # add by ml
-
+            self.device)
 
         # params_to_train_nerf += list(self.nerf_outside.parameters())
         params_to_train_geo += list(self.udf_network_fine.parameters())
+        params_to_train += list(self.color_network.parameters())
+        # params_to_train += list(self.vd_network.parameters())
+        # params_to_train += list(self.vi_network.parameters())
         params_to_train += list(self.variance_network_fine.parameters())
         params_to_train += list(self.beta_network.parameters())
 
-        params_to_train += list(self.color_network.parameters())
-        params_to_train += list(self.vd_network.parameters())   # add by ml
+        params_to_train_vi += list(self.vi_network.parameters())
+        params_to_train_vd += list(self.vd_network.parameters())
 
-        self.optimizer = torch.optim.Adam(
+        # self.optimizer = torch.optim.Adam(
+        #     [
+        #         {"params": params_to_train_geo, "lr": self.learning_rate_geo},
+        #         {"params": params_to_train},
+        #         {"params": params_to_train_nerf},
+        #     ],
+        #     lr=self.learning_rate,
+        # )
+        self.optimizer_color = torch.optim.Adam(
             [
                 {"params": params_to_train_geo, "lr": self.learning_rate_geo},
                 {"params": params_to_train},
@@ -127,6 +144,14 @@ class Runner:
             ],
             lr=self.learning_rate,
         )
+        self.optimizer_vi = torch.optim.Adam(
+            [{"params": params_to_train_vi},], lr=self.learning_rate,
+        )
+        self.optimizer_vd = torch.optim.Adam(
+            [{"params": params_to_train_vd},], lr=self.learning_rate,
+        )
+
+
 
         self.renderer = UDFRendererBlending(
             self.nerf_outside,
@@ -135,6 +160,7 @@ class Runner:
             self.beta_network,
             self.color_network,
             self.vd_network,
+            self.vi_network,
             device=self.device,
             **self.conf["model.udf_renderer"],
         )
@@ -145,10 +171,10 @@ class Runner:
         else:
             alpha = self.learning_rate_alpha
             progress = (self.iter_step - self.warm_up_end) / (
-                self.end_iter - self.warm_up_end
+                    self.end_iter - self.warm_up_end
             )
             learning_factor = (np.cos(np.pi * progress) + 1.0) * 0.5 * (
-                1 - alpha
+                    1 - alpha
             ) + alpha
 
         for g in self.optimizer.param_groups[start_g_id:]:
@@ -164,14 +190,15 @@ class Runner:
         else:
             alpha = self.learning_rate_alpha
             progress = (self.iter_step - self.end_iter * 0.5) / (
-                self.end_iter - self.end_iter * 0.5
+                    self.end_iter - self.end_iter * 0.5
             )
             learning_factor = (np.cos(np.pi * progress) + 1.0) * 0.5 * (
-                1 - alpha
+                    1 - alpha
             ) + alpha
 
         for g in self.optimizer.param_groups[:1]:
             g["lr"] = self.learning_rate_geo * learning_factor
+
 
     def get_cos_anneal_ratio(self):
         if self.anneal_end == 0.0:

@@ -64,6 +64,13 @@ class Runner_UDF(Runner):
             leave=True,
         )
         for iter_i in par:
+
+            # if iter_i < 20000:
+            #     for param in self.vi_network.parameters():
+            #         param.requires_grad = False
+            # else:
+            #     for param in self.vi_network.parameters():
+            #         param.requires_grad = True
             if self.same_lr:
                 self.update_learning_rate(start_g_id=0)
             else:
@@ -116,7 +123,9 @@ class Runner_UDF(Runner):
             edge = render_out["edge"]
             color = render_out["color"]
             depth = render_out["depth"]
-            v_error = render_out["v_error"]
+            # v_error = render_out["v_error"]
+            vi_edge = render_out["vi_edge"]
+            vd_edge = render_out["vd_edge"]
 
             variance = render_out["variance"]
             beta = render_out["beta"]
@@ -144,16 +153,15 @@ class Runner_UDF(Runner):
                 *self.color_loss_weight
             )
 
-            # psnr = 20.0 * torch.log10(
-            #     1.0 / (((edge - true_edge) ** 2 * mask).sum() / (mask_sum)).sqrt()
-            # )
-            # psnr_list.append(psnr)
-
             psnr = 20.0 * torch.log10(
-                1.0 / (((color - true_color) ** 2 * mask).sum() / (mask_sum)).sqrt()
+                1.0 / (((edge - true_edge) ** 2 * mask).sum() / (mask_sum)).sqrt()
             )
             psnr_list.append(psnr)
 
+            # psnr = 20.0 * torch.log10(
+            #     1.0 / (((color - true_color) ** 2 * mask).sum() / (mask_sum)).sqrt()
+            # )
+            # psnr_list.append(psnr)
 
             # Eikonal loss
             gradient_error_loss = gradient_error
@@ -176,12 +184,32 @@ class Runner_UDF(Runner):
 
             igr_ns_weight = self.igr_ns_weight
 
+            # if iter_i < 10000:
+            #     loss = (
+            #             # edge_loss
+            #             + color_loss
+            #             # + vi_loss * 0.1
+            #             # + vd_loss * 0.1
+            #             # + v_error
+            #             + gradient_error_near_surface * igr_ns_weight
+            #             + gradient_error_loss * self.igr_weight
+            #     )
+            # else:
+            #     loss = (
+            #             edge_loss
+            #             + color_loss
+            #             # + vi_loss * 0.1
+            #             # + vd_loss * 0.1
+            #             + v_error
+            #             + gradient_error_near_surface * igr_ns_weight
+            #             + gradient_error_loss * self.igr_weight
+            #     )
+
             loss = (
-                edge_loss
-                + color_loss
-                + v_error
-                + gradient_error_near_surface * igr_ns_weight
-                + gradient_error_loss * self.igr_weight
+                    edge_loss
+                    + color_loss
+                    + gradient_error_near_surface * igr_ns_weight
+                    + gradient_error_loss * self.igr_weight
             )
 
             par.set_description("PSNR: {:.2f}, Loss: {:.2f}".format(psnr, loss.item()))
@@ -283,7 +311,12 @@ class Runner_UDF(Runner):
         self.beta_network.load_state_dict(checkpoint["beta_network"])
         self.color_network.load_state_dict(checkpoint["color_network"])
         self.vd_network.load_state_dict(checkpoint["vd_network"])
-        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        self.vi_network.load_state_dict(checkpoint["vi_network"])
+
+        self.optimizer_color.load_state_dict(checkpoint["optimizer_color"])
+        self.optimizer_vi.load_state_dict(checkpoint["optimizer_vi"])
+        self.optimizer_vd.load_state_dict(checkpoint["optimizer_vd"])
+
         self.iter_step = checkpoint["iter_step"]
 
         logging.info("End")
@@ -298,7 +331,12 @@ class Runner_UDF(Runner):
             "beta_network": self.beta_network.state_dict(),
             "color_network": self.color_network.state_dict(),
             "vd_network": self.vd_network.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
+            "vi_network": self.vi_network.state_dict(),
+
+            "optimizer_color": self.optimizer_color.state_dict(),
+            "optimizer_vi": self.optimizer_vi.state_dict(),
+            "optimizer_vd": self.optimizer_vd.state_dict(),
+
             "iter_step": self.iter_step,
         }
 

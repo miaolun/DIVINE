@@ -118,6 +118,7 @@ class UDFRendererBlending:
         beta_network,
         color_network,
         vd_network,
+        vi_network,
         n_samples,
         n_importance,
         n_outside,
@@ -137,6 +138,7 @@ class UDFRendererBlending:
         self.deviation_network = deviation_network
         self.beta_network = beta_network  # use to detect zero-level set
         self.vd_network = vd_network
+        self.vi_network = vi_network
         self.color_network = color_network
 
         # sampling setting
@@ -420,12 +422,30 @@ class UDFRendererBlending:
         return alpha
 
     # add by ml
-    def gaussian_1d(self, x, mu=0.0 , sigma=0.2, amplitude=1.0):
+    def gaussian_1d(self, x, sigma, mu=0.0, amplitude=1.0):
         return amplitude * torch.exp(-((x - mu) ** 2) / (2 * sigma ** 2))
 
     def squared_constraint_loss(self, vi, vd):
         excess = torch.relu(vi + vd -1)
         return torch.mean(excess ** 2)
+
+    # def weighted_smooth_max(self, a, b, k=10, w=2):
+    #     return torch.log(w * torch.exp(k * a) + torch.exp(k * b)) / k
+
+    def threshold_mask(self, tensor, threshold = 0.9):
+        """
+        生成一个mask，将tensor中超过阈值的元素设置为1.0，其余设置为0.0
+
+        参数:
+            tensor (torch.Tensor): 输入张量
+            threshold (float): 阈值
+
+        返回:
+            torch.Tensor: 生成的mask张量，与输入张量形状相同，元素为0.0或1.0
+        """
+        # 比较操作生成布尔张量，然后转换为浮点型
+        mask = (tensor > threshold).float()
+        return mask
 
     def render_core(
         self,
@@ -437,6 +457,7 @@ class UDFRendererBlending:
         deviation_network,
         color_network,
         vd_network,
+        vi_network,
         beta_network=None,
         cos_anneal_ratio=None,
         background_rgb=None,
@@ -469,26 +490,18 @@ class UDFRendererBlending:
         dirs = dirs.reshape(-1, 3)
 
         udf_nn_output, inputs = udf_network(pts)
-
         udf = udf_nn_output[:, :1]
-        vi = udf_nn_output[:, 1:2]
-        feature_vector = udf_nn_output[:, 2:]
+        feature_vector = udf_nn_output[:, 1:]
 
         gradients = udf_network.gradient(pts).reshape(batch_size * n_samples, 3)
 
         gradients_mag = torch.linalg.norm(gradients, ord=2, dim=-1, keepdim=True)
         gradients_norm = gradients / (gradients_mag + 1e-5)  # normalize to unit vector
 
-        vd = vd_network(gradients_norm, dirs, feature_vector)
-        sampled_color = color_network(gradients_norm, dirs, feature_vector)
+        vi = vi_network(feature_vector)
+        vd = vd_network(dirs, gradients_norm, feature_vector)
+        sampled_color = color_network(dirs, gradients_norm, feature_vector)
 
-        # # geometry constraint
-        dependent_mask = self.gaussian_1d((dirs * gradients_norm).sum(dim=1).unsqueeze(1))
-        vd = torch.sigmoid(vd)
-        vi = torch.sigmoid(vi)
-
-        p_edge = (1 - dependent_mask) * vi + dependent_mask * vd
-        v_error = self.squared_constraint_loss(vi, vd)
 
         inv_s = deviation_network(torch.zeros([1, 3]).to(self.device))[:, :1].clip(
             1e-6, 1e6
@@ -630,12 +643,11 @@ class UDFRendererBlending:
 
         weights_sum = weights.sum(dim=-1, keepdim=True)
 
-        vd_render = vd * dependent_mask
-
         vi_edge = (vi.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
+        vd_render = self.gaussian_1d((dirs * gradients).sum(dim=1), sigma=0.13).unsqueeze(1)
         vd_edge = (vd_render.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
 
-        edge = (p_edge.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
+        edge = (vd.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
         color = (sampled_color.reshape(batch_size, n_samples, 3) * weights[:,:, None]).sum(dim=1)
         depth = (mid_z_vals * weights[:, :n_samples]).sum(dim=1, keepdim=True)
         if background_rgb is not None:  # Fixed background, usually black
@@ -679,7 +691,6 @@ class UDFRendererBlending:
         # smooth loss
         near_surface_idx = near_surface.reshape(-1).bool()
         surface_gradients = gradients.reshape(-1, 3)[near_surface_idx]
-
         surface_gradients = F.normalize(surface_gradients, dim=-1)
 
         return {
@@ -711,7 +722,7 @@ class UDFRendererBlending:
 
             "vi_edge": vi_edge,
             "vd_edge": vd_edge,
-            "v_error": v_error,
+            # "v_error": v_error,
         }
 
     def render(
@@ -810,6 +821,7 @@ class UDFRendererBlending:
             self.deviation_network,
             self.color_network,
             self.vd_network,
+            self.vi_network,
             beta_network=self.beta_network,
             cos_anneal_ratio=cos_anneal_ratio,
             background_rgb=background_rgb,
@@ -840,7 +852,7 @@ class UDFRendererBlending:
             "dists": ret_fine["dists"],
             "vi_edge": ret_fine["vi_edge"],
             "vd_edge": ret_fine["vd_edge"],
-            "v_error": ret_fine["v_error"],
+            # "v_error": ret_fine["v_error"],
         }
 
     @torch.no_grad()
