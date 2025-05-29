@@ -177,7 +177,9 @@ class Runner:
                     1 - alpha
             ) + alpha
 
-        for g in self.optimizer.param_groups[start_g_id:]:
+        for g in self.optimizer_color.param_groups[start_g_id:]:
+            g["lr"] = self.learning_rate * learning_factor
+        for g in self.optimizer_vd.param_groups:
             g["lr"] = self.learning_rate * learning_factor
 
     def update_learning_rate_geo(self):
@@ -196,7 +198,7 @@ class Runner:
                     1 - alpha
             ) + alpha
 
-        for g in self.optimizer.param_groups[:1]:
+        for g in self.optimizer_color.param_groups[:1]:
             g["lr"] = self.learning_rate_geo * learning_factor
 
 

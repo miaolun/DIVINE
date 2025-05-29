@@ -644,7 +644,7 @@ class UDFRendererBlending:
         weights_sum = weights.sum(dim=-1, keepdim=True)
 
         vi_edge = (vi.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
-        vd_render = self.gaussian_1d((dirs * gradients).sum(dim=1), sigma=0.13).unsqueeze(1)
+        vd_render = self.gaussian_1d((dirs * gradients).sum(dim=1), sigma=0.2).unsqueeze(1)
         vd_edge = (vd_render.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
 
         edge = (vd.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)

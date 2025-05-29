@@ -49,11 +49,12 @@ class Runner_UDF(Runner):
         self.writer = SummaryWriter(log_dir=os.path.join(self.base_exp_dir, "logs"))
 
         # ** check
-        for g in self.optimizer.param_groups:
+        for g in self.optimizer_color.param_groups:
             g["lr"] = self.learning_rate
 
         beta_flag = True
         psnr_list = []
+        psnr_list_color = []
         self.best_psnr = 0.0
 
         # tqdm with discription of loss
@@ -158,10 +159,10 @@ class Runner_UDF(Runner):
             )
             psnr_list.append(psnr)
 
-            # psnr = 20.0 * torch.log10(
-            #     1.0 / (((color - true_color) ** 2 * mask).sum() / (mask_sum)).sqrt()
-            # )
-            # psnr_list.append(psnr)
+            psnr_color = 20.0 * torch.log10(
+                1.0 / (((color - true_color) ** 2 * mask).sum() / (mask_sum)).sqrt()
+            )
+            # psnr_list_color.append(psnr_color)
 
             # Eikonal loss
             gradient_error_loss = gradient_error
@@ -184,39 +185,41 @@ class Runner_UDF(Runner):
 
             igr_ns_weight = self.igr_ns_weight
 
-            # if iter_i < 10000:
-            #     loss = (
-            #             # edge_loss
-            #             + color_loss
-            #             # + vi_loss * 0.1
-            #             # + vd_loss * 0.1
-            #             # + v_error
-            #             + gradient_error_near_surface * igr_ns_weight
-            #             + gradient_error_loss * self.igr_weight
-            #     )
-            # else:
-            #     loss = (
-            #             edge_loss
-            #             + color_loss
-            #             # + vi_loss * 0.1
-            #             # + vd_loss * 0.1
-            #             + v_error
-            #             + gradient_error_near_surface * igr_ns_weight
-            #             + gradient_error_loss * self.igr_weight
-            #     )
-
             loss = (
-                    edge_loss
                     + color_loss
                     + gradient_error_near_surface * igr_ns_weight
                     + gradient_error_loss * self.igr_weight
             )
 
-            par.set_description("PSNR: {:.2f}, Loss: {:.2f}".format(psnr, loss.item()))
+            par.set_description("PSNR_edge: {:.2f}, PSNR_color: {:.2f}, Loss_base: {:.2f}, Loss_edge: {:.2f}".format(psnr, psnr_color, loss.item(), edge_loss.item()),
+                                )
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+            vd_params = list(self.vd_network.parameters())
+
+            # 清空 vd optimizer 的旧梯度
+            self.optimizer_vd.zero_grad()
+
+            # 计算 vd 网络参数的梯度（不会保留整个图，也不会影响后续的 total_loss.backward）
+            vd_grads = torch.autograd.grad(
+                outputs=edge_loss,
+                inputs=vd_params,
+                retain_graph=False,  # 不保留图
+                create_graph=False  # 不为梯度计算二阶导
+            )
+
+            # 将梯度手动写入，每个 param.grad
+            for p, g in zip(vd_params, vd_grads):
+                p.grad = g
+
+            # 更新 vd 网络
+            self.optimizer_vd.step()
+
+            # 3. 优化 color/geo/variance/beta 网络（针对 total_loss）
+            self.optimizer_color.zero_grad()
+            loss.backward()  # 正常单次 backward，图会在计算完毕后释放
+            self.optimizer_color.step()
+
+
 
             self.iter_step += 1
 
@@ -235,6 +238,7 @@ class Runner_UDF(Runner):
             self.writer.add_scalar("Sta/variance", variance.mean(), self.iter_step)
             self.writer.add_scalar("Sta/beta", beta.item(), self.iter_step)
             self.writer.add_scalar("Sta/psnr", psnr, self.iter_step)
+
 
             if self.iter_step % self.report_freq == 0:
                 print(
@@ -259,8 +263,10 @@ class Runner_UDF(Runner):
                         variance.mean(),
                         beta.item(),
                         gamma.item(),
-                        self.optimizer.param_groups[0]["lr"],
-                        self.optimizer.param_groups[1]["lr"],
+                        self.optimizer_color.param_groups[0]["lr"],
+                        self.optimizer_color.param_groups[1]["lr"],
+                        self.optimizer_vi.param_groups[0]["lr"],
+                        self.optimizer_vd.param_groups[0]["lr"],
                     )
                 )
 
@@ -300,6 +306,13 @@ class Runner_UDF(Runner):
             if self.iter_step % len(image_perm) == 0:
                 image_perm = torch.randperm(self.dataset.n_images)
 
+    def safe_update_grad(self, params, grads):
+        for param, g in zip(params, grads):
+            if g is not None:
+                if param.grad is None:
+                    param.grad = g.clone()
+                else:
+                    param.grad += g
 
     def load_checkpoint(self, checkpoint_name):
         checkpoint = torch.load(
