@@ -425,27 +425,87 @@ class UDFRendererBlending:
     def gaussian_1d(self, x, sigma, mu=0.0, amplitude=1.0):
         return amplitude * torch.exp(-((x - mu) ** 2) / (2 * sigma ** 2))
 
-    def squared_constraint_loss(self, vi, vd):
-        excess = torch.relu(vi + vd -1)
-        return torch.mean(excess ** 2)
+    # def squared_constraint_loss(self, vi, vd):
+    #     excess = torch.relu(vi + vd -1)
+    #     return torch.mean(excess ** 2)
 
-    # def weighted_smooth_max(self, a, b, k=10, w=2):
-    #     return torch.log(w * torch.exp(k * a) + torch.exp(k * b)) / k
+    def threshold_mask(self, tensor, threshold=0.15, radius=3):
+        if radius < 0:
+            raise ValueError("半径必须是非负整数")
 
-    def threshold_mask(self, tensor, threshold = 0.9):
+            # 创建布尔掩码（大于阈值的位置为True）
+        bool_mask = tensor > threshold
+
+        # 特殊情况处理：半径为0或没有True元素
+        if radius == 0 or not bool_mask.any():
+            return torch.ones_like(tensor, dtype=torch.float)
+
+        # 转换为浮点型张量
+        float_mask = bool_mask.float()
+        original_shape = float_mask.shape
+        dim = float_mask.dim()
+
+        # 根据维度调整张量形状
+        if dim == 2:
+            # 2D: (H, W) -> (1, 1, H, W)
+            float_mask = float_mask.unsqueeze(0).unsqueeze(0)
+        elif dim == 3:
+            # 3D: (C, H, W) -> (1, C, H, W)
+            float_mask = float_mask.unsqueeze(0)
+        elif dim != 4:
+            raise ValueError("输入张量必须是2D、3D或4D")
+
+        # 应用最大池化（模拟膨胀操作）
+        kernel_size = 2 * radius + 1
+        expanded = F.max_pool2d(
+            float_mask,
+            kernel_size=kernel_size,
+            stride=1,
+            padding=radius
+        )
+
+        # 生成结果掩码（膨胀区域为0，其余为1）
+        result = 1 - expanded
+
+        # 恢复原始形状
+        if dim == 2:
+            result = result.squeeze(0).squeeze(0)
+        elif dim == 3:
+            result = result.squeeze(0)
+
+        return result
+
+    def surface_mask(self, tensor, threshold=0.02):
+        mask = tensor < threshold
+        float_mask = mask.float()
+        return float_mask
+
+    def conditional_zero_tensor(self, tensor1, tensor2, threshold=0.1, epsilon=1e-6):
         """
-        生成一个mask，将tensor中超过阈值的元素设置为1.0，其余设置为0.0
+        优化后的版本，便于反向传播计算
 
         参数:
-            tensor (torch.Tensor): 输入张量
-            threshold (float): 阈值
+            tensor1 (torch.Tensor): 第一个输入张量
+            tensor2 (torch.Tensor): 第二个输入张量，形状与tensor1相同
+            threshold (float): 判断元素是否"接近"的阈值
+            epsilon (float): 当元素不接近时，tensor1对应位置将被设置为这个接近0的值
 
         返回:
-            torch.Tensor: 生成的mask张量，与输入张量形状相同，元素为0.0或1.0
+            torch.Tensor: 处理后的张量
         """
-        # 比较操作生成布尔张量，然后转换为浮点型
-        mask = (tensor > threshold).float()
-        return mask
+        # 计算绝对差值（保持梯度）
+        diff = (tensor1 - tensor2).abs()
+
+        # 创建接近掩码（不需要梯度）
+        with torch.no_grad():
+            close_mask = diff <= threshold
+
+        # 使用masked_fill替代torch.where，更高效
+        # 注意：这里不能直接使用masked_fill，因为我们需要保留梯度
+        # 所以采用乘法方式实现
+        result = tensor1 * close_mask.to(tensor1.dtype) + (~close_mask).to(tensor1.dtype) * epsilon
+
+        return result
 
     def render_core(
         self,
@@ -494,14 +554,13 @@ class UDFRendererBlending:
         feature_vector = udf_nn_output[:, 1:]
 
         gradients = udf_network.gradient(pts).reshape(batch_size * n_samples, 3)
-
         gradients_mag = torch.linalg.norm(gradients, ord=2, dim=-1, keepdim=True)
         gradients_norm = gradients / (gradients_mag + 1e-5)  # normalize to unit vector
 
-        vi = vi_network(feature_vector)
-        vd = vd_network(dirs, gradients_norm, feature_vector)
-        sampled_color = color_network(dirs, gradients_norm, feature_vector)
-
+        vi = vd_network(-1 * gradients, gradients, feature_vector)
+        # vi = vi_network(feature_vector)
+        vd = vd_network(dirs, gradients, feature_vector)
+        sampled_color = color_network(dirs, gradients, feature_vector)
 
         inv_s = deviation_network(torch.zeros([1, 3]).to(self.device))[:, :1].clip(
             1e-6, 1e6
@@ -643,9 +702,15 @@ class UDFRendererBlending:
 
         weights_sum = weights.sum(dim=-1, keepdim=True)
 
+        surface_mask = self.surface_mask(udf_nn_output[:, :1])
+        vi = vi * surface_mask
+        vd = vd * surface_mask
+
         vi_edge = (vi.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
-        vd_render = self.gaussian_1d((dirs * gradients).sum(dim=1), sigma=0.2).unsqueeze(1)
-        vd_edge = (vd_render.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
+        dependent_mask = self.gaussian_1d((dirs * gradients_norm).sum(dim=1), sigma=0.2).unsqueeze(1)
+        vd_edge = (dependent_mask.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
+        vd_mask = self.threshold_mask(vd_edge)
+        # edge = vd_edge + vi_edge
 
         edge = (vd.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
         color = (sampled_color.reshape(batch_size, n_samples, 3) * weights[:,:, None]).sum(dim=1)
@@ -722,7 +787,7 @@ class UDFRendererBlending:
 
             "vi_edge": vi_edge,
             "vd_edge": vd_edge,
-            # "v_error": v_error,
+            "vd_mask": vd_mask,
         }
 
     def render(
@@ -852,7 +917,7 @@ class UDFRendererBlending:
             "dists": ret_fine["dists"],
             "vi_edge": ret_fine["vi_edge"],
             "vd_edge": ret_fine["vd_edge"],
-            # "v_error": ret_fine["v_error"],
+            "vd_mask": ret_fine["vd_mask"],
         }
 
     @torch.no_grad()

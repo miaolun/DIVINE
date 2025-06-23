@@ -82,7 +82,7 @@ def main():
 
     if args.mode == "train":
         logging.info(f"Training UDF")
-        runner.train()
+        runner.inference()
     elif args.mode == "extract_edge":
         logging.info(f"Extracting edges from UDF")
         runner.extract_edge(

@@ -42,7 +42,7 @@ def main():
 
     # Parameters for the training
     parser.add_argument(
-        "--conf", type=str, default="./confs/ABC.conf", help="Path to the config file."
+        "--conf", type=str, default="./confs/DTU.conf", help="Path to the config file."
     )
     parser.add_argument(
         "--mode",
@@ -82,13 +82,13 @@ def main():
 
     if args.mode == "train":
         logging.info(f"Training UDF")
-        runner.train()
+        runner.inference()
     elif args.mode == "extract_edge":
         logging.info(f"Extracting edges from UDF")
         runner.extract_edge(
             resolution=conf["edge_extraction"]["resolution"],
             udf_threshold=conf["edge_extraction"]["udf_threshold"],
-            # p_threshold=conf["edge_extraction"]["p_threshold"],
+            edge_threshold=conf["edge_extraction"]["edge_threshold"],
             sampling_N=conf["edge_extraction"]["sampling_N"],
             sampling_delta=conf["edge_extraction"]["sampling_delta"],
             is_pointshift=conf["edge_extraction"]["is_pointshift"],

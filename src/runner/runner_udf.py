@@ -100,6 +100,7 @@ class Runner_UDF(Runner):
                 data["color"],
             )
 
+            true_edge = self.true_edge_func(true_edge)
             near, far = self.near, self.far
 
             mask = torch.ones_like(true_edge).float()
@@ -127,6 +128,7 @@ class Runner_UDF(Runner):
             # v_error = render_out["v_error"]
             vi_edge = render_out["vi_edge"]
             vd_edge = render_out["vd_edge"]
+            vd_mask = render_out["vd_mask"]
 
             variance = render_out["variance"]
             beta = render_out["beta"]
@@ -140,11 +142,18 @@ class Runner_UDF(Runner):
             udf_min = udf.min(dim=1)[0][mask[:, 0] > 0.5].mean()
 
             edge_loss = (
-                self.edge_loss_func(
+                self.bce_loss_func(
                     edge,
                     true_edge,
                 )
                 * self.edge_weight
+            )
+            vi_loss =(
+                    self.bce_loss_func(
+                        vi_edge,
+                        true_edge * vd_mask,
+                    )
+                    * self.edge_weight
             )
 
             color_loss = (self.edge_loss_func(
@@ -195,28 +204,20 @@ class Runner_UDF(Runner):
                                 )
 
             vd_params = list(self.vd_network.parameters())
-
-            # 清空 vd optimizer 的旧梯度
             self.optimizer_vd.zero_grad()
-
-            # 计算 vd 网络参数的梯度（不会保留整个图，也不会影响后续的 total_loss.backward）
             vd_grads = torch.autograd.grad(
-                outputs=edge_loss,
+                outputs=edge_loss + vi_loss,
                 inputs=vd_params,
                 retain_graph=False,  # 不保留图
                 create_graph=False  # 不为梯度计算二阶导
             )
-
-            # 将梯度手动写入，每个 param.grad
             for p, g in zip(vd_params, vd_grads):
                 p.grad = g
-
-            # 更新 vd 网络
             self.optimizer_vd.step()
 
             # 3. 优化 color/geo/variance/beta 网络（针对 total_loss）
             self.optimizer_color.zero_grad()
-            loss.backward()  # 正常单次 backward，图会在计算完毕后释放
+            loss.backward()
             self.optimizer_color.step()
 
 
@@ -385,6 +386,7 @@ class Runner_UDF(Runner):
         out_edge_vi = []
         out_edge_vd = []
         out_color = []
+        out_mask = []
 
         for rays_o_batch, rays_d_batch, depth_scale_batch in zip(
             rays_o, rays_d, depth_scale
@@ -416,6 +418,7 @@ class Runner_UDF(Runner):
                 out_edge_fine.append(render_out["edge"].detach().cpu().numpy())
                 out_edge_vi.append(render_out["vi_edge"].detach().cpu().numpy())
                 out_edge_vd.append(render_out["vd_edge"].detach().cpu().numpy())
+                out_mask.append(render_out["vd_mask"].detach().cpu().numpy())
             if feasible("edge_pixel"):
                 out_edge_pixel.append(render_out["edge_pixel"].detach().cpu().numpy())
             if feasible("depth"):
@@ -500,6 +503,7 @@ class Runner_UDF(Runner):
         img_edge_fine = None
         img_edge_vi = None
         img_edge_vd = None
+        img_mask = None
         if len(out_edge_fine) > 0:
             edge_fine = (
                 np.concatenate(out_edge_fine, axis=0).reshape([H, W]) * 255
@@ -521,6 +525,14 @@ class Runner_UDF(Runner):
             img_edge_vd = np.array(
                 Image.fromarray(edge_vd.astype(np.uint8)).convert("RGB")
             )
+
+            vd_mask = (
+                    np.concatenate(out_mask, axis=0).reshape([H, W]) * 255
+            ).clip(0, 255)
+            img_mask = np.array(
+                Image.fromarray(vd_mask.astype(np.uint8)).convert("RGB")
+            )
+
         img_edge_pixel = None
         if len(out_edge_pixel) > 0:
             img_edge_pixel = (
@@ -535,6 +547,7 @@ class Runner_UDF(Runner):
                 edges = [img_edge_fine]
                 edges_vi = [img_edge_vi]
                 edges_vd = [img_edge_vd]
+                vd_masks = [img_mask]
 
             gt_edge = self.dataset.edge_at(
                 idx, resolution_level=resolution_level
@@ -546,8 +559,8 @@ class Runner_UDF(Runner):
                     "{:0>8d}_{}.png".format(self.iter_step, idx),
                 ),
                 np.concatenate(
-                    edges_vi + edges_vd + edges + [np.array(Image.fromarray(gt_edge).convert("RGB"))]
-                ),
+                    edges_vi + edges_vd + edges + vd_masks + [np.array(Image.fromarray(gt_edge).convert("RGB"))]
+                , axis=1),
             )
 
         # color
@@ -618,6 +631,7 @@ class Runner_UDF(Runner):
         self,
         resolution=256,
         udf_threshold=1.0,
+        edge_threshold=0.1,
         sampling_N=50,
         sampling_delta=5e-3,
         is_pointshift=False,
@@ -649,6 +663,7 @@ class Runner_UDF(Runner):
             raise NotImplementedError("Model type other than 'udf' is not supported.")
 
         func = self.udf_network_fine.udf
+        vd_network = self.vd_network.edge_prob
 
         def func_grad(xyz):
             gradients = self.udf_network_fine.gradient(xyz)
@@ -659,8 +674,10 @@ class Runner_UDF(Runner):
         points, line_directions = get_pointcloud_from_udf(
             func,
             func_grad,
+            vd_network,
             N_MC=resolution,
             udf_threshold=udf_threshold,
+            edge_threshold=edge_threshold,
             sampling_N=sampling_N,
             sampling_delta=sampling_delta,
             is_pointshift=is_pointshift,
@@ -900,45 +917,26 @@ class Runner_UDF(Runner):
                 )
 
                 # 将渲染结果存储为该帧的输出
-                out_edge_fine.append(render_out["edge"].detach().cpu().numpy())
+                out_edge_fine.append(render_out["vi_edge"].detach().cpu().numpy())
 
-            # edge_fine = (np.concatenate(out_edge_fine, axis=0).reshape([H, W]) * 255
-            #     ).clip(0, 255)
-            # img_edge_fine = np.array(
-            #         Image.fromarray(edge_fine.astype(np.uint8)).convert("RGB")
-            #     )
-            # out_frames.append(img_edge_fine)
-            # cv.imwrite(os.path.join(r"D:\workspace\ND-NeRF\exp\DTU\scan105", "{}.png".format(frame_idx)), img_edge_fine)
-
-            # 设置阈值
-            threshold = 0.5  # 假设阈值为 0.5（可根据需要调整）
-
-            # 将边缘数据拼接并处理成灰度图
-            edge_fine = (np.concatenate(out_edge_fine, axis=0).reshape([H, W]) * 255).clip(0, 255)
-
-            # 创建一个 RGB 图像模板，初始为白色
-            img_edge_fine = np.ones((H, W, 3), dtype=np.uint8) * 255  # 初始化为白色
-
-            # 将高于阈值的部分设置为红色
-            mask = edge_fine > (threshold * 255)  # 阈值判断，转换为与 255 范围一致
-            img_edge_fine[mask] = [255, 0, 0]  # 高于阈值的区域设为红色
-
-            # 保存红白图像到 out_frames
+            edge_fine = (np.concatenate(out_edge_fine, axis=0).reshape([H, W]) * 255
+                ).clip(0, 255)
+            img_edge_fine = np.array(
+                    Image.fromarray(edge_fine.astype(np.uint8)).convert("RGB")
+                )
             out_frames.append(img_edge_fine)
+            cv.imwrite(os.path.join(r"D:\workspace\ND-NeRF\exp\DTU\scan122", "{}.png".format(frame_idx)), img_edge_fine)
 
-            # 保存结果到本地
-            cv.imwrite(os.path.join(r"D:\workspace\ND-NeRF\exp\DTU\scan105", "{}.png".format(frame_idx)), img_edge_fine)
 
         # 使用 imageio 保存为视频
         video_filename = "rotation_video.mp4"
         # imageio.mimwrite(video_filename, out_frames, fps=30)  # 30 帧每秒
-        imageio.mimwrite(os.path.join(r"D:\workspace\ND-NeRF\exp\DTU\scan105", video_filename),
+        imageio.mimwrite(os.path.join(r"D:\workspace\ND-NeRF\exp\DTU\scan122", video_filename),
                          out_frames, fps=30)
 
         # logging.info(f"Video saved as {video_filename}")
         print("Video generation done")
 
         return "done"
-
 
 

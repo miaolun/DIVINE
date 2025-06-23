@@ -226,6 +226,10 @@ class RenderingNetwork(nn.Module):
 
         return out
 
+    def edge_prob(self, view_dirs, normals, feature_vectors):
+        out = self.forward(view_dirs, normals, feature_vectors)
+        return out
+
 class ViNetwork(RenderingNetwork):
     def __init__(self,
         d_feature,
