@@ -49,12 +49,11 @@ class Runner_UDF(Runner):
         self.writer = SummaryWriter(log_dir=os.path.join(self.base_exp_dir, "logs"))
 
         # ** check
-        for g in self.optimizer_color.param_groups:
+        for g in self.optimizer.param_groups:
             g["lr"] = self.learning_rate
 
         beta_flag = True
         psnr_list = []
-        psnr_list_color = []
         self.best_psnr = 0.0
 
         # tqdm with discription of loss
@@ -65,13 +64,6 @@ class Runner_UDF(Runner):
             leave=True,
         )
         for iter_i in par:
-
-            # if iter_i < 20000:
-            #     for param in self.vi_network.parameters():
-            #         param.requires_grad = False
-            # else:
-            #     for param in self.vi_network.parameters():
-            #         param.requires_grad = True
             if self.same_lr:
                 self.update_learning_rate(start_g_id=0)
             else:
@@ -100,7 +92,6 @@ class Runner_UDF(Runner):
                 data["color"],
             )
 
-            true_edge = self.true_edge_func(true_edge)
             near, far = self.near, self.far
 
             mask = torch.ones_like(true_edge).float()
@@ -125,10 +116,7 @@ class Runner_UDF(Runner):
             edge = render_out["edge"]
             color = render_out["color"]
             depth = render_out["depth"]
-            # v_error = render_out["v_error"]
-            vi_edge = render_out["vi_edge"]
-            vd_edge = render_out["vd_edge"]
-            vd_mask = render_out["vd_mask"]
+            v_error = render_out["v_error"]
 
             variance = render_out["variance"]
             beta = render_out["beta"]
@@ -142,18 +130,11 @@ class Runner_UDF(Runner):
             udf_min = udf.min(dim=1)[0][mask[:, 0] > 0.5].mean()
 
             edge_loss = (
-                self.bce_loss_func(
+                self.edge_loss_func(
                     edge,
                     true_edge,
                 )
                 * self.edge_weight
-            )
-            vi_loss =(
-                    self.bce_loss_func(
-                        vi_edge,
-                        true_edge * vd_mask,
-                    )
-                    * self.edge_weight
             )
 
             color_loss = (self.edge_loss_func(
@@ -163,15 +144,16 @@ class Runner_UDF(Runner):
                 *self.color_loss_weight
             )
 
+            # psnr = 20.0 * torch.log10(
+            #     1.0 / (((edge - true_edge) ** 2 * mask).sum() / (mask_sum)).sqrt()
+            # )
+            # psnr_list.append(psnr)
+
             psnr = 20.0 * torch.log10(
-                1.0 / (((edge - true_edge) ** 2 * mask).sum() / (mask_sum)).sqrt()
+                1.0 / (((color - true_color) ** 2 * mask).sum() / (mask_sum)).sqrt()
             )
             psnr_list.append(psnr)
 
-            psnr_color = 20.0 * torch.log10(
-                1.0 / (((color - true_color) ** 2 * mask).sum() / (mask_sum)).sqrt()
-            )
-            # psnr_list_color.append(psnr_color)
 
             # Eikonal loss
             gradient_error_loss = gradient_error
@@ -195,32 +177,18 @@ class Runner_UDF(Runner):
             igr_ns_weight = self.igr_ns_weight
 
             loss = (
-                    + color_loss
-                    + gradient_error_near_surface * igr_ns_weight
-                    + gradient_error_loss * self.igr_weight
+                edge_loss
+                + color_loss
+                + v_error
+                + gradient_error_near_surface * igr_ns_weight
+                + gradient_error_loss * self.igr_weight
             )
 
-            par.set_description("PSNR_edge: {:.2f}, PSNR_color: {:.2f}, Loss_base: {:.2f}, Loss_edge: {:.2f}".format(psnr, psnr_color, loss.item(), edge_loss.item()),
-                                )
+            par.set_description("PSNR: {:.2f}, Loss: {:.2f}".format(psnr, loss.item()))
 
-            vd_params = list(self.vd_network.parameters())
-            self.optimizer_vd.zero_grad()
-            vd_grads = torch.autograd.grad(
-                outputs=edge_loss + vi_loss,
-                inputs=vd_params,
-                retain_graph=False,  # 不保留图
-                create_graph=False  # 不为梯度计算二阶导
-            )
-            for p, g in zip(vd_params, vd_grads):
-                p.grad = g
-            self.optimizer_vd.step()
-
-            # 3. 优化 color/geo/variance/beta 网络（针对 total_loss）
-            self.optimizer_color.zero_grad()
+            self.optimizer.zero_grad()
             loss.backward()
-            self.optimizer_color.step()
-
-
+            self.optimizer.step()
 
             self.iter_step += 1
 
@@ -239,7 +207,6 @@ class Runner_UDF(Runner):
             self.writer.add_scalar("Sta/variance", variance.mean(), self.iter_step)
             self.writer.add_scalar("Sta/beta", beta.item(), self.iter_step)
             self.writer.add_scalar("Sta/psnr", psnr, self.iter_step)
-
 
             if self.iter_step % self.report_freq == 0:
                 print(
@@ -264,10 +231,8 @@ class Runner_UDF(Runner):
                         variance.mean(),
                         beta.item(),
                         gamma.item(),
-                        self.optimizer_color.param_groups[0]["lr"],
-                        self.optimizer_color.param_groups[1]["lr"],
-                        self.optimizer_vi.param_groups[0]["lr"],
-                        self.optimizer_vd.param_groups[0]["lr"],
+                        self.optimizer.param_groups[0]["lr"],
+                        self.optimizer.param_groups[1]["lr"],
                     )
                 )
 
@@ -307,13 +272,6 @@ class Runner_UDF(Runner):
             if self.iter_step % len(image_perm) == 0:
                 image_perm = torch.randperm(self.dataset.n_images)
 
-    def safe_update_grad(self, params, grads):
-        for param, g in zip(params, grads):
-            if g is not None:
-                if param.grad is None:
-                    param.grad = g.clone()
-                else:
-                    param.grad += g
 
     def load_checkpoint(self, checkpoint_name):
         checkpoint = torch.load(
@@ -325,12 +283,7 @@ class Runner_UDF(Runner):
         self.beta_network.load_state_dict(checkpoint["beta_network"])
         self.color_network.load_state_dict(checkpoint["color_network"])
         self.vd_network.load_state_dict(checkpoint["vd_network"])
-        self.vi_network.load_state_dict(checkpoint["vi_network"])
-
-        self.optimizer_color.load_state_dict(checkpoint["optimizer_color"])
-        self.optimizer_vi.load_state_dict(checkpoint["optimizer_vi"])
-        self.optimizer_vd.load_state_dict(checkpoint["optimizer_vd"])
-
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.iter_step = checkpoint["iter_step"]
 
         logging.info("End")
@@ -345,12 +298,7 @@ class Runner_UDF(Runner):
             "beta_network": self.beta_network.state_dict(),
             "color_network": self.color_network.state_dict(),
             "vd_network": self.vd_network.state_dict(),
-            "vi_network": self.vi_network.state_dict(),
-
-            "optimizer_color": self.optimizer_color.state_dict(),
-            "optimizer_vi": self.optimizer_vi.state_dict(),
-            "optimizer_vd": self.optimizer_vd.state_dict(),
-
+            "optimizer": self.optimizer.state_dict(),
             "iter_step": self.iter_step,
         }
 
@@ -386,7 +334,6 @@ class Runner_UDF(Runner):
         out_edge_vi = []
         out_edge_vd = []
         out_color = []
-        out_mask = []
 
         for rays_o_batch, rays_d_batch, depth_scale_batch in zip(
             rays_o, rays_d, depth_scale
@@ -418,7 +365,6 @@ class Runner_UDF(Runner):
                 out_edge_fine.append(render_out["edge"].detach().cpu().numpy())
                 out_edge_vi.append(render_out["vi_edge"].detach().cpu().numpy())
                 out_edge_vd.append(render_out["vd_edge"].detach().cpu().numpy())
-                out_mask.append(render_out["vd_mask"].detach().cpu().numpy())
             if feasible("edge_pixel"):
                 out_edge_pixel.append(render_out["edge_pixel"].detach().cpu().numpy())
             if feasible("depth"):
@@ -503,7 +449,6 @@ class Runner_UDF(Runner):
         img_edge_fine = None
         img_edge_vi = None
         img_edge_vd = None
-        img_mask = None
         if len(out_edge_fine) > 0:
             edge_fine = (
                 np.concatenate(out_edge_fine, axis=0).reshape([H, W]) * 255
@@ -525,14 +470,6 @@ class Runner_UDF(Runner):
             img_edge_vd = np.array(
                 Image.fromarray(edge_vd.astype(np.uint8)).convert("RGB")
             )
-
-            vd_mask = (
-                    np.concatenate(out_mask, axis=0).reshape([H, W]) * 255
-            ).clip(0, 255)
-            img_mask = np.array(
-                Image.fromarray(vd_mask.astype(np.uint8)).convert("RGB")
-            )
-
         img_edge_pixel = None
         if len(out_edge_pixel) > 0:
             img_edge_pixel = (
@@ -547,7 +484,6 @@ class Runner_UDF(Runner):
                 edges = [img_edge_fine]
                 edges_vi = [img_edge_vi]
                 edges_vd = [img_edge_vd]
-                vd_masks = [img_mask]
 
             gt_edge = self.dataset.edge_at(
                 idx, resolution_level=resolution_level
@@ -559,8 +495,8 @@ class Runner_UDF(Runner):
                     "{:0>8d}_{}.png".format(self.iter_step, idx),
                 ),
                 np.concatenate(
-                    edges_vi + edges_vd + edges + vd_masks + [np.array(Image.fromarray(gt_edge).convert("RGB"))]
-                , axis=1),
+                    edges_vi + edges_vd + edges + [np.array(Image.fromarray(gt_edge).convert("RGB"))]
+                ),
             )
 
         # color
@@ -631,7 +567,6 @@ class Runner_UDF(Runner):
         self,
         resolution=256,
         udf_threshold=1.0,
-        edge_threshold=0.1,
         sampling_N=50,
         sampling_delta=5e-3,
         is_pointshift=False,
@@ -663,7 +598,6 @@ class Runner_UDF(Runner):
             raise NotImplementedError("Model type other than 'udf' is not supported.")
 
         func = self.udf_network_fine.udf
-        vd_network = self.vd_network.edge_prob
 
         def func_grad(xyz):
             gradients = self.udf_network_fine.gradient(xyz)
@@ -674,10 +608,8 @@ class Runner_UDF(Runner):
         points, line_directions = get_pointcloud_from_udf(
             func,
             func_grad,
-            vd_network,
             N_MC=resolution,
             udf_threshold=udf_threshold,
-            edge_threshold=edge_threshold,
             sampling_N=sampling_N,
             sampling_delta=sampling_delta,
             is_pointshift=is_pointshift,
@@ -917,26 +849,45 @@ class Runner_UDF(Runner):
                 )
 
                 # 将渲染结果存储为该帧的输出
-                out_edge_fine.append(render_out["vi_edge"].detach().cpu().numpy())
+                out_edge_fine.append(render_out["edge"].detach().cpu().numpy())
 
-            edge_fine = (np.concatenate(out_edge_fine, axis=0).reshape([H, W]) * 255
-                ).clip(0, 255)
-            img_edge_fine = np.array(
-                    Image.fromarray(edge_fine.astype(np.uint8)).convert("RGB")
-                )
+            # edge_fine = (np.concatenate(out_edge_fine, axis=0).reshape([H, W]) * 255
+            #     ).clip(0, 255)
+            # img_edge_fine = np.array(
+            #         Image.fromarray(edge_fine.astype(np.uint8)).convert("RGB")
+            #     )
+            # out_frames.append(img_edge_fine)
+            # cv.imwrite(os.path.join(r"D:\workspace\ND-NeRF\exp\DTU\scan105", "{}.png".format(frame_idx)), img_edge_fine)
+
+            # 设置阈值
+            threshold = 0.5  # 假设阈值为 0.5（可根据需要调整）
+
+            # 将边缘数据拼接并处理成灰度图
+            edge_fine = (np.concatenate(out_edge_fine, axis=0).reshape([H, W]) * 255).clip(0, 255)
+
+            # 创建一个 RGB 图像模板，初始为白色
+            img_edge_fine = np.ones((H, W, 3), dtype=np.uint8) * 255  # 初始化为白色
+
+            # 将高于阈值的部分设置为红色
+            mask = edge_fine > (threshold * 255)  # 阈值判断，转换为与 255 范围一致
+            img_edge_fine[mask] = [255, 0, 0]  # 高于阈值的区域设为红色
+
+            # 保存红白图像到 out_frames
             out_frames.append(img_edge_fine)
-            cv.imwrite(os.path.join(r"D:\workspace\ND-NeRF\exp\DTU\scan122", "{}.png".format(frame_idx)), img_edge_fine)
 
+            # 保存结果到本地
+            cv.imwrite(os.path.join(r"D:\workspace\ND-NeRF\exp\DTU\scan105", "{}.png".format(frame_idx)), img_edge_fine)
 
         # 使用 imageio 保存为视频
         video_filename = "rotation_video.mp4"
         # imageio.mimwrite(video_filename, out_frames, fps=30)  # 30 帧每秒
-        imageio.mimwrite(os.path.join(r"D:\workspace\ND-NeRF\exp\DTU\scan122", video_filename),
+        imageio.mimwrite(os.path.join(r"D:\workspace\ND-NeRF\exp\DTU\scan105", video_filename),
                          out_frames, fps=30)
 
         # logging.info(f"Video saved as {video_filename}")
         print("Video generation done")
 
         return "done"
+
 
 

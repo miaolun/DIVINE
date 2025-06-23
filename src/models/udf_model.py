@@ -189,7 +189,7 @@ class RenderingNetwork(nn.Module):
 
         self.relu = nn.ReLU()
 
-    def forward(self, view_dirs, normals, feature_vectors):
+    def forward(self, normals, view_dirs, feature_vectors):
         if self.embedview_fn is not None:
             view_dirs = self.embedview_fn(view_dirs)
 
@@ -226,54 +226,6 @@ class RenderingNetwork(nn.Module):
 
         return out
 
-    def edge_prob(self, view_dirs, normals, feature_vectors):
-        out = self.forward(view_dirs, normals, feature_vectors)
-        return out
-
-class ViNetwork(RenderingNetwork):
-    def __init__(self,
-        d_feature,
-        mode,
-        d_in,
-        d_out,
-        d_hidden,
-        n_layers,
-        weight_norm=True,
-        multires_view=0,
-        squeeze_out=True):
-
-        super(ViNetwork, self).__init__(d_feature,
-        mode,
-        d_in,
-        d_out,
-        d_hidden,
-        n_layers,
-        weight_norm,
-        multires_view,
-        squeeze_out)
-
-    def forward(self, feature_vectors):
-        x = feature_vectors
-
-        for l in range(0, self.num_layers - 1):
-            lin = getattr(self, "lin" + str(l))
-
-            x = lin(x)
-
-            if l < self.num_layers - 2:
-                x = self.relu(x)
-
-        if self.squeeze_out:
-            out = torch.sigmoid(x[:, : self.d_out])
-        else:
-            out = x[:, : self.d_out]
-
-        return out
-
-    def vi(self, x):
-        vi = self.forward(x)
-        return  vi
-
 
 class SingleVarianceNetwork(nn.Module):
     def __init__(self, init_val, requires_grad=True):
@@ -303,10 +255,8 @@ class BetaNetwork(nn.Module):
         self,
         init_var_beta=0.1,
         init_var_gamma=0.1,
-        init_var_zeta=0.1,
+        init_var_zeta=0.05,
         beta_min=0.00005,
-        zeta_max=0.2,
-        zeta_min=0.1,
         requires_grad_beta=True,
         requires_grad_gamma=True,
         requires_grad_zeta=True,
@@ -323,8 +273,6 @@ class BetaNetwork(nn.Module):
             torch.Tensor([init_var_zeta]), requires_grad=requires_grad_zeta
         )
         self.beta_min = beta_min
-        self.zeta_max = zeta_max
-        self.zeta_min = zeta_min
 
     def get_beta(self):
         return torch.exp(self.beta * 10).clip(0, 1.0 / self.beta_min)
@@ -338,8 +286,7 @@ class BetaNetwork(nn.Module):
         :return:
         :rtype:
         """
-        # return self.zeta.abs()
-        return  self.zeta.abs()
+        return self.zeta.abs()
 
     def set_beta_trainable(self):
         self.beta.requires_grad = True

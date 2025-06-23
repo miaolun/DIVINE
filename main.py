@@ -5,7 +5,7 @@ import numpy as np
 import random
 from pyhocon import ConfigFactory
 from src.runner.runner_udf import Runner_UDF
-# from src.runner.runner_two_stage import Runner_UDF
+
 
 def fix_random_seeds(seed=42):
     """
@@ -57,7 +57,7 @@ def main():
     parser.add_argument("--gpu", type=int, default=0, help="GPU id to use.")
     parser.add_argument(
         "--is_continue",
-        default=True,
+        default=False,
         action="store_true",
         help="Flag to continue training.",
     )
@@ -82,7 +82,7 @@ def main():
 
     if args.mode == "train":
         logging.info(f"Training UDF")
-        runner.inference()
+        runner.train()
     elif args.mode == "extract_edge":
         logging.info(f"Extracting edges from UDF")
         runner.extract_edge(

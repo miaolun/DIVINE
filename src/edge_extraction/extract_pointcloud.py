@@ -5,10 +5,8 @@ from torch.nn import functional as F
 def get_udf_normals_grid(
     func,
     func_grad,
-    vd_network,
     N,
     udf_threshold,
-    edge_threshold,
     is_linedirection=False,
     sampling_N=50,
     sampling_delta=0.005,
@@ -36,7 +34,7 @@ def get_udf_normals_grid(
     """
 
     overall_index = torch.arange(0, N**3, 1, out=torch.LongTensor())
-    samples = torch.zeros(N**3, 13, device=device)
+    samples = torch.zeros(N**3, 12, device=device)
     # transform first 3 columns
     # to be the x, y, z index
     samples[:, 2] = overall_index % N
@@ -60,17 +58,11 @@ def get_udf_normals_grid(
     for head in range(0, num_samples, max_batch):
         tail = min(head + max_batch, num_samples)
         sample_subset = samples[head:tail, :3].clone().to(device)
-        df, feature, _= func(sample_subset)
-        grad = func_grad(sample_subset).squeeze(1)
-        grad_mag = torch.linalg.norm(grad, ord=2, dim=-1, keepdim=True)
-        grad_norm = grad / (grad_mag + 1e-5)
-        vi = vd_network(-1*grad_norm, grad_norm, feature)
-
+        df, _, _= func(sample_subset)
         samples[head:tail, 3:4] = df.detach()
-        samples[head:tail, 12:13] = vi.detach()
 
     # Compute gradients where distance field value is below threshold
-    norm_mask = (samples[:, 3] < udf_threshold) & (samples[:, 12] > edge_threshold)
+    norm_mask = samples[:, 3] < udf_threshold
     norm_idx = torch.where(norm_mask)[0]
     for head in range(0, len(norm_idx), max_batch):
         tail = min(head + max_batch, len(norm_idx))
@@ -99,9 +91,8 @@ def get_udf_normals_grid(
     df_values = samples[:, 3].reshape(N, N, N)
     vecs = samples[:, 4:7].reshape(N, N, N, 3)
     ld = samples[:, 8:11].reshape(N, N, N, 3)
-    edge_prob = samples[:, 12].reshape(N, N, N)
 
-    return df_values, edge_prob, ld, vecs, samples, torch.tensor(voxel_size)
+    return df_values, ld, vecs, samples, torch.tensor(voxel_size)
 
 
 def get_udf_normals_slow(
@@ -221,10 +212,8 @@ def project_vector_onto_plane(A, B):
 def get_pointcloud_from_udf(
     func,
     func_grad,
-    vd_network,
     N_MC=128,
     udf_threshold=1.0,
-    edge_threshold=0.1,
     sampling_N=50,
     sampling_delta=5e-3,
     is_pointshift=False,
@@ -248,13 +237,11 @@ def get_pointcloud_from_udf(
         indices: Indices of coordinates that need updating in the next iteration.
     """
     # Compute UDF normals and grid
-    df_values, edge_prob, lds, normals, samples, voxel_size = get_udf_normals_grid(
+    df_values, lds, normals, samples, voxel_size = get_udf_normals_grid(
         func=func,
         func_grad=func_grad,
-        vd_network=vd_network,
         N=N_MC,
         udf_threshold=udf_threshold,
-        edge_threshold=edge_threshold,
         is_linedirection=is_linedirection,
         sampling_N=sampling_N,
         sampling_delta=sampling_delta,
@@ -262,18 +249,17 @@ def get_pointcloud_from_udf(
     )
 
     # Reshape tensors for processing
-    df_values, edge_prob, lds, normals, samples = (
+    df_values, lds, normals, samples = (
         df_values.reshape(-1),
-        edge_prob.reshape(-1),
         lds.reshape(-1, 3),
         normals.reshape(-1, 3),
-        samples.reshape(-1, 13),
+        samples.reshape(-1, 12),
     )
     xyz = samples[:, 0:3]
     df_values.clamp_(min=0)  # Ensure distance field values are non-negative
 
     # Filter out points too far from the surface
-    points_idx = (df_values <= udf_threshold) & (edge_prob >= edge_threshold)
+    points_idx = df_values <= udf_threshold
     filtered_xyz, filtered_lds, normals, df_values = (
         xyz[points_idx],
         lds[points_idx],
