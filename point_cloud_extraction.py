@@ -42,7 +42,7 @@ def main():
 
     # Parameters for the training
     parser.add_argument(
-        "--conf", type=str, default="./confs/ABC.conf", help="Path to the config file."
+        "--conf", type=str, default="./confs/DTU.conf", help="Path to the config file."
     )
     parser.add_argument(
         "--mode",
@@ -88,7 +88,7 @@ def main():
         runner.extract_edge(
             resolution=conf["edge_extraction"]["resolution"],
             udf_threshold=conf["edge_extraction"]["udf_threshold"],
-            # p_threshold=conf["edge_extraction"]["p_threshold"],
+            p_threshold=conf["edge_extraction"]["p_threshold"],
             sampling_N=conf["edge_extraction"]["sampling_N"],
             sampling_delta=conf["edge_extraction"]["sampling_delta"],
             is_pointshift=conf["edge_extraction"]["is_pointshift"],

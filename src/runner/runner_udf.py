@@ -116,7 +116,6 @@ class Runner_UDF(Runner):
             edge = render_out["edge"]
             color = render_out["color"]
             depth = render_out["depth"]
-            v_error = render_out["v_error"]
 
             variance = render_out["variance"]
             beta = render_out["beta"]
@@ -124,32 +123,33 @@ class Runner_UDF(Runner):
 
             gradient_error = render_out["gradient_error"]
             gradient_error_near_surface = render_out["gradient_error_near_surface"]
-
+            grad_error = render_out["grad_error"]
 
             udf = render_out["udf"]
             udf_min = udf.min(dim=1)[0][mask[:, 0] > 0.5].mean()
+            true_edge_calculate = self.true_edge_func(true_edge)
 
             edge_loss = (
                 self.edge_loss_func(
                     edge,
-                    true_edge,
+                    true_edge_calculate,
                 )
                 * self.edge_weight
             )
 
-            color_loss = (self.edge_loss_func(
+            color_loss = (self.color_loss_func(
                 color,
                 true_color,
             )
                 *self.color_loss_weight
             )
 
-            # psnr = 20.0 * torch.log10(
-            #     1.0 / (((edge - true_edge) ** 2 * mask).sum() / (mask_sum)).sqrt()
-            # )
+            psnr = 20.0 * torch.log10(
+                1.0 / (((edge - true_edge) ** 2 * mask).sum() / (mask_sum)).sqrt()
+            )
             # psnr_list.append(psnr)
 
-            psnr = 20.0 * torch.log10(
+            psnr_color = 20.0 * torch.log10(
                 1.0 / (((color - true_color) ** 2 * mask).sum() / (mask_sum)).sqrt()
             )
             psnr_list.append(psnr)
@@ -179,12 +179,12 @@ class Runner_UDF(Runner):
             loss = (
                 edge_loss
                 + color_loss
-                + v_error
+                + grad_error
                 + gradient_error_near_surface * igr_ns_weight
                 + gradient_error_loss * self.igr_weight
             )
 
-            par.set_description("PSNR: {:.2f}, Loss: {:.2f}".format(psnr, loss.item()))
+            par.set_description("PSNR: {:.2f}, PSNR_COLOR: {:.2f}, Loss: {:.2f}".format(psnr, psnr_color, loss.item()))
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -496,7 +496,7 @@ class Runner_UDF(Runner):
                 ),
                 np.concatenate(
                     edges_vi + edges_vd + edges + [np.array(Image.fromarray(gt_edge).convert("RGB"))]
-                ),
+                , axis=1),
             )
 
         # color
@@ -567,6 +567,7 @@ class Runner_UDF(Runner):
         self,
         resolution=256,
         udf_threshold=1.0,
+        p_threshold=0.5,
         sampling_N=50,
         sampling_delta=5e-3,
         is_pointshift=False,
@@ -598,6 +599,7 @@ class Runner_UDF(Runner):
             raise NotImplementedError("Model type other than 'udf' is not supported.")
 
         func = self.udf_network_fine.udf
+        vd_network = self.vd_network.edge_prob
 
         def func_grad(xyz):
             gradients = self.udf_network_fine.gradient(xyz)
@@ -608,8 +610,10 @@ class Runner_UDF(Runner):
         points, line_directions = get_pointcloud_from_udf(
             func,
             func_grad,
+            vd_network,
             N_MC=resolution,
             udf_threshold=udf_threshold,
+            p_threshold=p_threshold,
             sampling_N=sampling_N,
             sampling_delta=sampling_delta,
             is_pointshift=is_pointshift,

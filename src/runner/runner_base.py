@@ -74,6 +74,7 @@ class Runner:
 
         # loss functions
         self.edge_loss_func = EdgeLoss(self.conf["edge_loss"]["loss_type"])
+        self.color_loss_func = EdgeLoss(self.conf["edge_loss"]["color_loss_type"])
         self.edge_weight = self.conf.get_float("edge_loss.edge_weight", 0.0)
         self.is_continue = is_continue
         # self.is_finetune = args.is_finetune
@@ -213,6 +214,9 @@ class Runner:
         ) as fd:
             res = HOCONConverter.to_hocon(self.conf)
             fd.write(res)
+
+    def true_edge_func(self, true_edge):
+        return (true_edge > 0.65).float()
 
     def train_udf(self):
         return NotImplementedError

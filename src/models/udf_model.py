@@ -133,22 +133,6 @@ class UDFNetwork(nn.Module):
             )[0]
         return gradients.unsqueeze(1)
 
-    def gradient_sdf(self,x):
-        x.requires_grad_(True)
-        with torch.set_grad_enabled(True):
-            y = self.udf(x)[1]
-
-            d_output = torch.ones_like(y, requires_grad=False, device=y.device)
-            gradients = torch.autograd.grad(
-                outputs=y,
-                inputs=x,
-                grad_outputs=d_output,
-                create_graph=True,
-                retain_graph=True,
-                only_inputs=True,
-            )[0]
-        return gradients.unsqueeze(1)
-
 
 class RenderingNetwork(nn.Module):
     def __init__(
@@ -189,7 +173,7 @@ class RenderingNetwork(nn.Module):
 
         self.relu = nn.ReLU()
 
-    def forward(self, normals, view_dirs, feature_vectors):
+    def forward(self, view_dirs, normals, feature_vectors):
         if self.embedview_fn is not None:
             view_dirs = self.embedview_fn(view_dirs)
 
@@ -204,7 +188,7 @@ class RenderingNetwork(nn.Module):
             )
         elif self.mode == "no_view_dir":
             rendering_input = torch.cat(
-                [normals, -1 * normals, feature_vectors], dim=-1
+                [-1 * normals, normals, feature_vectors], dim=-1
             )
         elif self.mode == "no_normal":
             rendering_input = torch.cat([view_dirs, feature_vectors], dim=-1)
@@ -225,6 +209,27 @@ class RenderingNetwork(nn.Module):
             out = x[:, : self.d_out]
 
         return out
+
+    def edge_prob(self, view_dirs, normals, feature_vectors):
+        out = self.forward(view_dirs, normals, feature_vectors)
+        return out
+
+    def gradient(self, view_dirs, normals, feature_vectors):
+        view_dirs.requires_grad_(True)
+        with torch.set_grad_enabled(True):
+            y = self.forward(view_dirs, normals, feature_vectors)
+
+            d_output = torch.ones_like(y, requires_grad=False, device=y.device)
+            gradients = torch.autograd.grad(
+                outputs=y,
+                inputs=view_dirs,
+                grad_outputs=d_output,
+                create_graph=True,
+                retain_graph=True,
+                only_inputs=True,
+            )[0]
+        return gradients
+
 
 
 class SingleVarianceNetwork(nn.Module):

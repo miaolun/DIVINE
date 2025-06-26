@@ -479,16 +479,13 @@ class UDFRendererBlending:
         gradients_mag = torch.linalg.norm(gradients, ord=2, dim=-1, keepdim=True)
         gradients_norm = gradients / (gradients_mag + 1e-5)  # normalize to unit vector
 
-        vd = vd_network(gradients_norm, dirs, feature_vector)
-        sampled_color = color_network(gradients_norm, dirs, feature_vector)
-
+        vd = vd_network(dirs, gradients, feature_vector)
+        # vi = vd_network(-1 * gradients_norm, gradients, feature_vector)
+        # grad_vi = vd_network.gradient(-1 * gradients_norm, gradients, feature_vector)
+        # grad_vd = vd_network.gradient( dirs, gradients, feature_vector)
+        sampled_color = color_network(dirs, gradients, feature_vector)
         # # geometry constraint
-        dependent_mask = self.gaussian_1d((dirs * gradients_norm).sum(dim=1).unsqueeze(1))
-        vd = torch.sigmoid(vd)
-        vi = torch.sigmoid(vi)
-
-        p_edge = (1 - dependent_mask) * vi + dependent_mask * vd
-        v_error = self.squared_constraint_loss(vi, vd)
+        # dependent_mask = self.gaussian_1d((dirs * gradients_norm).sum(dim=1).unsqueeze(1))
 
         inv_s = deviation_network(torch.zeros([1, 3]).to(self.device))[:, :1].clip(
             1e-6, 1e6
@@ -630,12 +627,15 @@ class UDFRendererBlending:
 
         weights_sum = weights.sum(dim=-1, keepdim=True)
 
-        vd_render = vd * dependent_mask
+        vd_circle = self.gaussian_1d((dirs * gradients_norm).sum(dim=1).unsqueeze(1))
+        vd_loss = F.mse_loss(vd, vd_circle)
+        vi = torch.sigmoid(vi) * (1 - vd_circle)
 
         vi_edge = (vi.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
-        vd_edge = (vd_render.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
+        vd_edge = (vd.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
 
-        edge = (p_edge.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
+        edge = vi_edge + vd_edge
+        # edge = (vd.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
         color = (sampled_color.reshape(batch_size, n_samples, 3) * weights[:,:, None]).sum(dim=1)
         depth = (mid_z_vals * weights[:, :n_samples]).sum(dim=1, keepdim=True)
         if background_rgb is not None:  # Fixed background, usually black
@@ -661,6 +661,18 @@ class UDFRendererBlending:
 
         # gradients = gradients / (
         #         torch.linalg.norm(gradients, ord=2, dim=-1, keepdim=True) + 1e-5)  # normalize to unit vector
+
+        # grad vd error
+        # grad_error_ = (
+        #         torch.linalg.norm(
+        #             grad_vd.reshape(batch_size, n_samples, 3), ord=2, dim=-1
+        #         )
+        #         - 0.0
+        # ) ** 2
+        # grad_error = (relax_inside_sphere * grad_error_).sum() / (
+        #     relax_inside_sphere.sum() + 1e-5
+        # )
+        # grad_error = None
 
         if torch.any(torch.isnan(gradient_error)).cpu().numpy().item():
             pdb.set_trace()
@@ -711,7 +723,7 @@ class UDFRendererBlending:
 
             "vi_edge": vi_edge,
             "vd_edge": vd_edge,
-            "v_error": v_error,
+            "grad_error": vd_loss,
         }
 
     def render(
@@ -840,7 +852,7 @@ class UDFRendererBlending:
             "dists": ret_fine["dists"],
             "vi_edge": ret_fine["vi_edge"],
             "vd_edge": ret_fine["vd_edge"],
-            "v_error": ret_fine["v_error"],
+            "grad_error": ret_fine["grad_error"],
         }
 
     @torch.no_grad()
