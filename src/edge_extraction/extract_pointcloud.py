@@ -61,10 +61,13 @@ def get_udf_normals_grid(
         tail = min(head + max_batch, num_samples)
         sample_subset = samples[head:tail, :3].clone().to(device)
         df, feature, _= func(sample_subset)
-        grad = func_grad(sample_subset).squeeze(1)
-        grad_mag = torch.linalg.norm(grad, ord=2, dim=-1, keepdim=True)
-        grad_norm = grad / (grad_mag + 1e-5)
-        vi = vd_network(-1*grad_norm, grad_norm, feature)
+        # grad = func_grad(sample_subset).squeeze(1)
+        # grad_mag = torch.linalg.norm(grad, ord=2, dim=-1, keepdim=True)
+        # grad_norm = grad / (grad_mag + 1e-5)
+        vi_output = vd_network(feature)
+        vi = vi_output[:, :1]
+
+        # print(torch.max(vi))
 
         samples[head:tail, 3:4] = df.detach()
         samples[head:tail, 12:13] = vi.detach()

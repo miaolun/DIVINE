@@ -57,7 +57,7 @@ def main():
     parser.add_argument("--gpu", type=int, default=0, help="GPU id to use.")
     parser.add_argument(
         "--is_continue",
-        default=True,
+        default=False,
         action="store_true",
         help="Flag to continue training.",
     )

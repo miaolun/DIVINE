@@ -557,9 +557,12 @@ class UDFRendererBlending:
         gradients_mag = torch.linalg.norm(gradients, ord=2, dim=-1, keepdim=True)
         gradients_norm = gradients / (gradients_mag + 1e-5)  # normalize to unit vector
 
-        vi = vd_network(-1 * gradients, gradients, feature_vector)
-        # vi = vi_network(feature_vector)
-        vd = vd_network(dirs, gradients, feature_vector)
+        # vi = vd_network(-1 * gradients, gradients, feature_vector)
+        vi_output = vi_network(feature_vector)
+        vi = vi_output[:, :1]
+        vi_feature = vi_output[:, 1:]
+
+        vd = vd_network(dirs, gradients, vi_feature)
         sampled_color = color_network(dirs, gradients, feature_vector)
 
         inv_s = deviation_network(torch.zeros([1, 3]).to(self.device))[:, :1].clip(
@@ -702,17 +705,22 @@ class UDFRendererBlending:
 
         weights_sum = weights.sum(dim=-1, keepdim=True)
 
-        surface_mask = self.surface_mask(udf_nn_output[:, :1])
-        vi = vi * surface_mask
-        vd = vd * surface_mask
+        # surface_mask = self.surface_mask(udf_nn_output[:, :1])
+        # vi = vi * surface_mask
+        # vd = vd * surface_mask
+        # vd_mask = self.threshold_mask(vd_edge)
+
+
+        cos_angle = torch.sum(dirs * gradients_norm, dim=1, keepdim=True)
+        vd_circle = self.gaussian_1d(cos_angle, sigma=0.2)
+        vd_error = F.mse_loss(vd, vd_circle)
+        vi = vi * (1 - vd_circle)
 
         vi_edge = (vi.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
-        dependent_mask = self.gaussian_1d((dirs * gradients_norm).sum(dim=1), sigma=0.2).unsqueeze(1)
-        vd_edge = (dependent_mask.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
-        vd_mask = self.threshold_mask(vd_edge)
-        # edge = vd_edge + vi_edge
+        vd_edge = (vd.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
 
-        edge = (vd.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
+        edge = vd_edge + vi_edge
+        # edge = (vd.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
         color = (sampled_color.reshape(batch_size, n_samples, 3) * weights[:,:, None]).sum(dim=1)
         depth = (mid_z_vals * weights[:, :n_samples]).sum(dim=1, keepdim=True)
         if background_rgb is not None:  # Fixed background, usually black
@@ -787,7 +795,7 @@ class UDFRendererBlending:
 
             "vi_edge": vi_edge,
             "vd_edge": vd_edge,
-            "vd_mask": vd_mask,
+            "vd_error": vd_error,
         }
 
     def render(
@@ -917,7 +925,7 @@ class UDFRendererBlending:
             "dists": ret_fine["dists"],
             "vi_edge": ret_fine["vi_edge"],
             "vd_edge": ret_fine["vd_edge"],
-            "vd_mask": ret_fine["vd_mask"],
+            "vd_error": ret_fine["vd_error"],
         }
 
     @torch.no_grad()

@@ -15,7 +15,7 @@ from src.models.udf_model import (
 )
 from src.models.udf_renderer_blending import UDFRendererBlending
 from src.models.loss import EdgeLoss
-
+from  src.models.famo import FAMO
 
 class Runner:
     def __init__(
@@ -75,7 +75,6 @@ class Runner:
 
         # loss functions
         self.edge_loss_func = EdgeLoss(self.conf["edge_loss"]["edge_loss_type"])
-        self.bce_loss_func = EdgeLoss(loss_type="bce")
         self.edge_weight = self.conf.get_float("edge_loss.edge_weight", 0.0)
         self.is_continue = is_continue
         # self.is_finetune = args.is_finetune
@@ -121,23 +120,15 @@ class Runner:
         # params_to_train_nerf += list(self.nerf_outside.parameters())
         params_to_train_geo += list(self.udf_network_fine.parameters())
         params_to_train += list(self.color_network.parameters())
-        # params_to_train += list(self.vd_network.parameters())
-        # params_to_train += list(self.vi_network.parameters())
+        params_to_train += list(self.vd_network.parameters())
+        params_to_train += list(self.vi_network.parameters())
         params_to_train += list(self.variance_network_fine.parameters())
         params_to_train += list(self.beta_network.parameters())
 
-        params_to_train_vi += list(self.vi_network.parameters())
-        params_to_train_vd += list(self.vd_network.parameters())
+        # params_to_train_vi += list(self.vi_network.parameters())
+        # params_to_train_vd += list(self.vd_network.parameters())
 
-        # self.optimizer = torch.optim.Adam(
-        #     [
-        #         {"params": params_to_train_geo, "lr": self.learning_rate_geo},
-        #         {"params": params_to_train},
-        #         {"params": params_to_train_nerf},
-        #     ],
-        #     lr=self.learning_rate,
-        # )
-        self.optimizer_color = torch.optim.Adam(
+        self.optimizer = torch.optim.Adam(
             [
                 {"params": params_to_train_geo, "lr": self.learning_rate_geo},
                 {"params": params_to_train},
@@ -145,14 +136,25 @@ class Runner:
             ],
             lr=self.learning_rate,
         )
-        self.optimizer_vi = torch.optim.Adam(
-            [{"params": params_to_train_vi},], lr=self.learning_rate,
-        )
-        self.optimizer_vd = torch.optim.Adam(
-            [{"params": params_to_train_vd},], lr=self.learning_rate,
-        )
+        self.weight_opt = FAMO(n_tasks=3, device=self.device)
 
-
+        # self.optimizer_edge = torch.optim.Adam(
+        #     [{"params": params_to_train_vi},
+        #      {"params": params_to_train_vd},
+        #      ], lr=self.learning_rate,
+        # )
+        # # self.optimizer_vd = torch.optim.Adam(
+        # #     [{"params": params_to_train_vd}, ], lr=self.learning_rate,
+        # # )
+        #
+        # self.optimizer_color = torch.optim.Adam(
+        #     [
+        #         {"params": params_to_train_geo, "lr": self.learning_rate_geo},
+        #         {"params": params_to_train},
+        #         {"params": params_to_train_nerf},
+        #     ],
+        #     lr=self.learning_rate,
+        # )
 
         self.renderer = UDFRendererBlending(
             self.nerf_outside,
@@ -178,10 +180,10 @@ class Runner:
                     1 - alpha
             ) + alpha
 
-        for g in self.optimizer_color.param_groups[start_g_id:]:
+        for g in self.optimizer.param_groups[start_g_id:]:
             g["lr"] = self.learning_rate * learning_factor
-        for g in self.optimizer_vd.param_groups:
-            g["lr"] = self.learning_rate * learning_factor
+        # for g in self.optimizer_edge.param_groups:
+        #     g["lr"] = self.learning_rate * learning_factor
 
     def update_learning_rate_geo(self):
         if self.iter_step < self.fix_geo_end:  # * make bg nerf learn first
@@ -199,7 +201,7 @@ class Runner:
                     1 - alpha
             ) + alpha
 
-        for g in self.optimizer_color.param_groups[:1]:
+        for g in self.optimizer.param_groups[:1]:
             g["lr"] = self.learning_rate_geo * learning_factor
 
 
