@@ -123,21 +123,20 @@ class Runner_UDF(Runner):
 
             gradient_error = render_out["gradient_error"]
             gradient_error_near_surface = render_out["gradient_error_near_surface"]
-            grad_error = render_out["grad_error"]
+            normals_error = render_out["normals_error"]
 
             udf = render_out["udf"]
             udf_min = udf.min(dim=1)[0][mask[:, 0] > 0.5].mean()
-            true_edge_calculate = self.true_edge_func(true_edge)
 
             edge_loss = (
                 self.edge_loss_func(
                     edge,
-                    true_edge_calculate,
+                    true_edge,
                 )
                 * self.edge_weight
             )
 
-            color_loss = (self.color_loss_func(
+            color_loss = (self.edge_loss_func(
                 color,
                 true_color,
             )
@@ -179,7 +178,7 @@ class Runner_UDF(Runner):
             loss = (
                 edge_loss
                 + color_loss
-                + grad_error
+                + normals_error
                 + gradient_error_near_surface * igr_ns_weight
                 + gradient_error_loss * self.igr_weight
             )
@@ -519,9 +518,6 @@ class Runner_UDF(Runner):
             ),
             color,
         )
-
-
-
 
         # normal
         normal_img = None

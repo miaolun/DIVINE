@@ -11,6 +11,7 @@ from src.models.udf_model import (
     BetaNetwork,
     SingleVarianceNetwork,
     RenderingNetwork,
+    DirectionalNetwork,
 )
 from src.models.udf_renderer_blending import UDFRendererBlending
 from src.models.loss import EdgeLoss
@@ -74,7 +75,6 @@ class Runner:
 
         # loss functions
         self.edge_loss_func = EdgeLoss(self.conf["edge_loss"]["loss_type"])
-        self.color_loss_func = EdgeLoss(self.conf["edge_loss"]["color_loss_type"])
         self.edge_weight = self.conf.get_float("edge_loss.edge_weight", 0.0)
         self.is_continue = is_continue
         # self.is_finetune = args.is_finetune
@@ -108,8 +108,8 @@ class Runner:
             self.device)
         self.color_network = RenderingNetwork(**self.conf["model.rendering_network"]).to(
             self.device)
-        self.vd_network = RenderingNetwork(**self.conf["model.vd_network"]).to(
-            self.device)    # add by ml
+        self.vd_network = DirectionalNetwork(**self.conf["model.vd_network"]).to(
+            self.device)
 
 
         # params_to_train_nerf += list(self.nerf_outside.parameters())

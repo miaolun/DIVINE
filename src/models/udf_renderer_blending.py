@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import pdb
-
+import math
 
 def extract_fields(bound_min, bound_max, resolution, query_func, device):
     N = 64
@@ -419,13 +419,41 @@ class UDFRendererBlending:
 
         return alpha
 
-    # add by ml
     def gaussian_1d(self, x, mu=0.0 , sigma=0.2, amplitude=1.0):
         return amplitude * torch.exp(-((x - mu) ** 2) / (2 * sigma ** 2))
 
-    def squared_constraint_loss(self, vi, vd):
-        excess = torch.relu(vi + vd -1)
-        return torch.mean(excess ** 2)
+    def generalized_binomial_coeff(self, a, k):
+        """Compute generalized binomial coefficients."""
+        return np.prod(a - np.arange(k)) / np.math.factorial(k)
+
+    def directional_encoding_torch(self, theta, kappa, N=10):
+        """
+        Args:
+            theta: Tensor of shape (m, 1) -- angles in radians
+            kappa: Tensor of shape (m, 1) -- concentration parameters
+            N: int -- number of frequencies
+        Returns:
+            Tensor of shape (m, 2*N) -- direction encoding features
+        """
+        m = theta.shape[0]
+        device = theta.device
+
+        # Shape: (1, N)
+        n = torch.arange(1, N + 1, device=device).unsqueeze(0)  # (1, N)
+
+        # Expand to shape (m, N)
+        n_theta = n * theta  # (m, N)
+        n_kappa = n * kappa  # (m, N)
+        weights = torch.exp(-0.5 * (n_kappa ** 2))  # (m, N)
+
+        # Compute features
+        cos_part = weights * torch.cos(n_theta)  # (m, N)
+        sin_part = weights * torch.sin(n_theta)  # (m, N)
+
+        # Concatenate along last dim: (m, 2N)
+        features = torch.cat([cos_part, sin_part], dim=-1)
+        return features
+
 
     def render_core(
         self,
@@ -472,21 +500,32 @@ class UDFRendererBlending:
 
         udf = udf_nn_output[:, :1]
         vi = udf_nn_output[:, 1:2]
-        feature_vector = udf_nn_output[:, 2:]
+        s = udf_nn_output[:, 2:3]
+        kappa = udf_nn_output[:, 3:4]
+        normals = udf_nn_output[:, 4:7]
+        feature_vector = udf_nn_output[:, 7:]
 
         gradients = udf_network.gradient(pts).reshape(batch_size * n_samples, 3)
-
         gradients_mag = torch.linalg.norm(gradients, ord=2, dim=-1, keepdim=True)
         gradients_norm = gradients / (gradients_mag + 1e-5)  # normalize to unit vector
+        normals_norm = F.normalize(normals, p=2, dim=-1)
 
-        vd = vd_network(dirs, gradients, feature_vector)
+        # calculate sita
+        dot = dirs * normals
+        dot_norm = ((dirs * normals_norm).sum(dim=1).unsqueeze(dim=1)).clip(-1.0 + 1e-6, 1.0 - 1e-6)
+        theta = torch.acos_(dot_norm)
+        vi = torch.sigmoid(vi)
+
+        # directional encoding
+        ide_encoding = self.directional_encoding_torch(theta, kappa)
+        vd = vd_network(ide_encoding, feature_vector)
+        sampled_color = color_network(dirs, gradients, feature_vector)
+
         # vi = vd_network(-1 * gradients_norm, gradients, feature_vector)
         # grad_vi = vd_network.gradient(-1 * gradients_norm, gradients, feature_vector)
         # grad_vd = vd_network.gradient( dirs, gradients, feature_vector)
-        sampled_color = color_network(dirs, gradients, feature_vector)
-        # # geometry constraint
-        # dependent_mask = self.gaussian_1d((dirs * gradients_norm).sum(dim=1).unsqueeze(1))
 
+        # weight calculation
         inv_s = deviation_network(torch.zeros([1, 3]).to(self.device))[:, :1].clip(
             1e-6, 1e6
         )  # Single parameter
@@ -627,16 +666,26 @@ class UDFRendererBlending:
 
         weights_sum = weights.sum(dim=-1, keepdim=True)
 
-        vd_circle = self.gaussian_1d((dirs * gradients_norm).sum(dim=1).unsqueeze(1))
-        vd_loss = F.mse_loss(vd, vd_circle)
-        vi = torch.sigmoid(vi) * (1 - vd_circle)
+        # normal loss
+        r_0 = torch.maximum(dot, torch.tensor(0.0))
+        r_0 = torch.norm(r_0, p=2, dim=1) ** 2
+        r_p = torch.sub(gradients_norm, normals)
+        r_p = torch.norm(r_p, p=2, dim=1) ** 2
 
+        error_r0 = (r_0.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum()
+        error_rp = (r_p.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum()
+        normals_error = 0.1 * error_r0 + 3 * 1e-4 * error_rp
+
+        # rendering edge and color
         vi_edge = (vi.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
         vd_edge = (vd.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
 
-        edge = vi_edge + vd_edge
-        # edge = (vd.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
+        s = torch.sigmoid(s)
+        p = torch.sigmoid(8 * (vi + s * vd - 0.5)) # k belong (6, 10)
+
+        edge = (p.reshape(batch_size, n_samples, 1) * weights[:, :, None]).sum(dim=1)
         color = (sampled_color.reshape(batch_size, n_samples, 3) * weights[:,:, None]).sum(dim=1)
+        # color = torch.ones_like(edge)
         depth = (mid_z_vals * weights[:, :n_samples]).sum(dim=1, keepdim=True)
         if background_rgb is not None:  # Fixed background, usually black
             edge = edge + background_rgb * (1.0 - weights_sum)
@@ -723,7 +772,7 @@ class UDFRendererBlending:
 
             "vi_edge": vi_edge,
             "vd_edge": vd_edge,
-            "grad_error": vd_loss,
+            "normals_error": normals_error,
         }
 
     def render(
@@ -852,7 +901,7 @@ class UDFRendererBlending:
             "dists": ret_fine["dists"],
             "vi_edge": ret_fine["vi_edge"],
             "vd_edge": ret_fine["vd_edge"],
-            "grad_error": ret_fine["grad_error"],
+            "normals_error": ret_fine["normals_error"],
         }
 
     @torch.no_grad()

@@ -105,7 +105,7 @@ class UDFNetwork(nn.Module):
                 x = self.activation(x)
 
         return (
-            torch.cat([self.udf_out(x[:, :1]) / self.scale, x[:, 1:]], dim=-1),
+            torch.cat([self.udf_out(x[:, :4]) / self.scale, x[:, 4:]], dim=-1),
             inputs,
         )
     def udf(self, x):
@@ -180,9 +180,6 @@ class RenderingNetwork(nn.Module):
         rendering_input = None
         normals = normals.detach()
         if self.mode == "idr":
-            # rendering_input = torch.cat(
-            #     [points, view_dirs, normals, -1 * normals, feature_vectors], dim=-1
-            # )
             rendering_input = torch.cat(
                 [view_dirs, normals, feature_vectors], dim=-1
             )
@@ -210,27 +207,68 @@ class RenderingNetwork(nn.Module):
 
         return out
 
-    def edge_prob(self, view_dirs, normals, feature_vectors):
-        out = self.forward(view_dirs, normals, feature_vectors)
+
+class DirectionalNetwork(nn.Module):
+    def __init__(
+            self,
+            d_feature,
+            mode,
+            d_in,
+            d_out,
+            d_hidden,
+            n_layers,
+            weight_norm=True,
+            multires_view=0,
+            squeeze_out=True,
+    ):
+        super().__init__()
+
+        self.mode = mode
+        self.squeeze_out = squeeze_out
+        self.d_out = d_out
+        dims = [d_in + d_feature] + [d_hidden for _ in range(n_layers)] + [d_out]
+
+        self.num_layers = len(dims)
+
+        for l in range(0, self.num_layers - 1):
+            out_dim = dims[l + 1]
+            lin = nn.Linear(dims[l], out_dim)
+
+            if weight_norm:
+                lin = nn.utils.parametrizations.weight_norm(lin)
+
+            setattr(self, "lin" + str(l), lin)
+
+        self.relu = nn.ReLU()
+
+    def forward(self, ide, feature_vectors):
+        rendering_input = None
+
+        if self.mode == "idr":
+            rendering_input = torch.cat(
+                [ide, feature_vectors], dim=-1
+            )
+        elif self.mode == "no_view_dir":
+            raise NotImplementedError
+        elif self.mode == "no_normal":
+            raise NotImplementedError
+
+        x = rendering_input
+
+        for l in range(0, self.num_layers - 1):
+            lin = getattr(self, "lin" + str(l))
+
+            x = lin(x)
+
+            if l < self.num_layers - 2:
+                x = self.relu(x)
+
+        if self.squeeze_out:
+            out = torch.sigmoid(x[:, : self.d_out])
+        else:
+            out = x[:, : self.d_out]
+
         return out
-
-    def gradient(self, view_dirs, normals, feature_vectors):
-        view_dirs.requires_grad_(True)
-        with torch.set_grad_enabled(True):
-            y = self.forward(view_dirs, normals, feature_vectors)
-
-            d_output = torch.ones_like(y, requires_grad=False, device=y.device)
-            gradients = torch.autograd.grad(
-                outputs=y,
-                inputs=view_dirs,
-                grad_outputs=d_output,
-                create_graph=True,
-                retain_graph=True,
-                only_inputs=True,
-            )[0]
-        return gradients
-
-
 
 class SingleVarianceNetwork(nn.Module):
     def __init__(self, init_val, requires_grad=True):
