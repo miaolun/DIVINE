@@ -1,1 +1,3 @@
-# ND-NeRF
+# DIVINE
+
+Coming soon
